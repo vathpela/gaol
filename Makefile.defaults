@@ -1,0 +1,27 @@
+#
+# Make.defaults
+# Peter Jones, 2018-05-16 13:48
+#
+CROSS_COMPILE	?=
+AR		:= $(CROSS_COMPILE)gcc-ar
+CC		:= $(CROSS_COMPILE)gcc
+CCLD		:= $(CROSS_COMPILE)gcc
+NM		:= $(CROSS_COMPILE)gcc-nm
+PKG_CONFIG	:= $(CROSS_COMPILE)pkg-config
+RANLIB		:= $(CROSS_COMPILE)gcc-ranlib
+
+CFLAGS		?= -Og -g3 -flto
+CPPFLAGS	?= -std=gnu11 -fPIC -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 \
+		   -Wall -Werror -Wextra \
+		   -Wno-error=cpp -Wno-error=suggest-attribute=format \
+		   -Wno-suggest-attribute=format -Wno-missing-format-attribute \
+		   -Wno-missing-field-initializers \
+		   $(call pkg-config-cflags)
+CCLDFLAGS	= $(CFLAGS) -fno-merge-constants \
+		  -Wl,--fatal-warnings,--no-allow-shlib-undefined \
+		  -Wl,-O2 -Wl,--no-undefined-version \
+		  $(call pkg-config-ldflags)
+SOFLAGS		= -shared
+
+# vim:ft=make
+#

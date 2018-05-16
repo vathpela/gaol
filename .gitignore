@@ -9,3 +9,5 @@
 *.rpm
 core.*
 cov-int
+launch
+guest.so

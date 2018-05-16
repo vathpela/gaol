@@ -1,0 +1,22 @@
+#
+# Make.rules
+# Peter Jones, 2018-05-16 13:48
+#
+
+pkg-config-cflags = \
+	$(shell if [ -n "$(PKGS)" ]; then $(PKG_CONFIG) --cflags $(PKGS); fi)
+pkg-config-ldflags = \
+	$(shell if [ -n "$(PKGS)" ]; then $(PKG_CONFIG) --libs-only-L --libs-only-other $(PKGS) ; fi)
+pkg-config-ldlibs = \
+	$(shell if [ -n "$(PKGS)" ]; then $(PKG_CONFIG) --libs-only-l $(PKGS) ; fi)
+
+objects-of = \
+	$(patsubst %.c,%.o,$(1))
+
+define deps-of =
+	$(foreach src,$(filter %.c,$(1)),$(patsubst %.c,.%.d,$(src))) \
+	$(foreach src,$(filter %.S,$(1)),$(patsubst %.S,.%.d,$(src)))
+endef
+
+# vim:ft=make
+#
