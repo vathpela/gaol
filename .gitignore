@@ -1,0 +1,11 @@
+.*.d
+.*.P
+.*.sw?
+*~
+*.E
+*.strace
+*.o
+*.tar.*
+*.rpm
+core.*
+cov-int
