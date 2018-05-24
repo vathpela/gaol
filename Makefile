@@ -12,7 +12,7 @@ include $(TOPDIR)/Makefile.defaults
 include $(TOPDIR)/Makefile.scan-build
 include $(TOPDIR)/Makefile.coverity
 
-TARGETS	= guest.so gaol
+TARGETS	= guest gaol
 all: $(TARGETS)
 
 LDLIBS	=
@@ -26,8 +26,8 @@ PKGS	=
           -Wl,-soname,$@.$(VERSION) \
           -o $@ $^ $(LDLIBS)
 
-guest.so : guest.c
-guest.so : | util.h
+guest : guest.c
+guest : | util.h
 gaol : gaol.c relocate.c
 gaol : | gaol.h relocate.h util.h
 

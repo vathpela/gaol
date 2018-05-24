@@ -1,22 +1,15 @@
+/*
+ * guest.c
+ * Copyright 2018 Peter Jones <pjones@redhat.com>
+ *
+ */
 
-#include <inttypes.h>
-#include <limits.h>
-#include <sys/param.h>
-#include <sys/user.h>
+#include <stdio.h>
 
-typedef union {
-        uint8_t u8[PAGE_SIZE];
-        uint16_t u16[PAGE_SIZE / sizeof(uint16_t)];
-        uint32_t u32[PAGE_SIZE / sizeof(uint32_t)];
-} page;
-
-extern page buffer;
-
-int
-main(void)
+int main(void)
 {
-        for (unsigned int x = 0; x < PAGE_SIZE / sizeof (uint32_t); x++) {
-                buffer.u32[x] = x;
-        }
+        printf("Goodbye, cruel world.\n");
         return 0;
 }
+
+// vim:fenc=utf-8:tw=75:et
