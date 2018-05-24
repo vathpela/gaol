@@ -1,5 +1,5 @@
 /*
- * launch.c
+ * gaol.c
  * Copyright 2018 Peter Jones <pjones@redhat.com>
  */
 
@@ -7,14 +7,14 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "launch.h"
+#include "gaol.h"
 
 static void noreturn
 usage(int status)
 {
         FILE *output = status == 0 ? stdout : stderr;
 
-        fprintf(output, "usage: launch <cmd>\n");
+        fprintf(output, "usage: gaol <cmd>\n");
         exit(status);
 }
 

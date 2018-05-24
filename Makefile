@@ -4,7 +4,7 @@
 #
 default : all
 
-NAME = antikernel
+NAME = gaol
 TOPDIR	:= $(shell echo $$PWD)
 include $(TOPDIR)/Makefile.version
 include $(TOPDIR)/Makefile.rules
@@ -12,7 +12,7 @@ include $(TOPDIR)/Makefile.defaults
 include $(TOPDIR)/Makefile.scan-build
 include $(TOPDIR)/Makefile.coverity
 
-TARGETS	= guest.so launch
+TARGETS	= guest.so gaol
 all: $(TARGETS)
 
 LDLIBS	=
@@ -28,8 +28,8 @@ PKGS	=
 
 guest.so : guest.c
 guest.so : | util.h
-launch : launch.c relocate.c
-launch : | launch.h relocate.h util.h
+gaol : gaol.c relocate.c
+gaol : | gaol.h relocate.h util.h
 
 clean :
 	rm -vf $(TARGETS) *.E *.o *.a *.so

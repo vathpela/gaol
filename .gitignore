@@ -9,5 +9,5 @@
 *.rpm
 core.*
 cov-int
-launch
+gaol
 guest.so
