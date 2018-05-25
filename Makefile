@@ -15,7 +15,7 @@ include $(TOPDIR)/Makefile.coverity
 TARGETS	= guest gaol
 all: $(TARGETS)
 
-LDLIBS	?=
+LDLIBS	+= -ldl
 PKGS	=
 
 % : %.c
