@@ -15,10 +15,10 @@ include $(TOPDIR)/Makefile.coverity
 TARGETS	= guest gaol
 all: $(TARGETS)
 
-LDLIBS	=
+LDLIBS	?=
 PKGS	=
 
-% : | %.c
+% : %.c
 	$(CCLD) $(CCLDFLAGS) $(CPPFLAGS) -o $@ $^ $(LDLIBS)
 
 %.so :
@@ -26,10 +26,9 @@ PKGS	=
           -Wl,-soname,$@.$(VERSION) \
           -o $@ $^ $(LDLIBS)
 
-guest : guest.c
-guest : | util.h
-gaol : gaol.c relocate.c
-gaol : | gaol.h relocate.h util.h
+gaol : | gaol.h relocate.h compiler.h page.h list.h
+gaol : PKGS+=libelf
+gaol : relocate.c
 
 clean :
 	rm -vf $(TARGETS) *.E *.o *.a *.so
