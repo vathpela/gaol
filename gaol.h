@@ -7,6 +7,9 @@
 #define GAOL_H_
 
 #include "compiler.h"
+#include "page.h"
+#include "list.h"
+
 #include "relocate.h"
 
 #endif /* !GAOL_H_ */
