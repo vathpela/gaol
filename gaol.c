@@ -39,22 +39,11 @@ find_executable(const char *filename)
         }
 
         if (strchr(filename, '/')) {
-                char *cwd;
+                char *filepath;
 
-                cwd = getcwd(NULL, 0);
-                if (!cwd)
-                        return NULL;
-
-                filepath = calloc(sizeof(char),
-                                  strlen(cwd) + sizeof("/") + strlen(filename));
+                filepath = canonicalize_file_name(filename);
                 if (!filepath)
                         return NULL;
-
-                tmp = stpcpy(filepath, cwd);
-                tmp = stpcpy(tmp, "/");
-                tmp = stpcpy(tmp, filename);
-
-                free(cwd);
 
                 if (!access(filepath, X_OK))
                         return filepath;
