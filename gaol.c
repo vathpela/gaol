@@ -3,9 +3,15 @@
  * Copyright 2018 Peter Jones <pjones@redhat.com>
  */
 
+#include <unistd.h>
+#include <err.h>
+#include <errno.h>
+#include <paths.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/types.h>
 
 #include "gaol.h"
 
@@ -14,31 +20,102 @@ usage(int status)
 {
         FILE *output = status == 0 ? stdout : stderr;
 
-        fprintf(output, "usage: gaol <cmd>\n");
+        fprintf(output, "usage: gaol <cmd> [<arg0> ... <argN>]\n");
         exit(status);
+}
+
+char *
+find_executable(const char *filename)
+{
+        char *path = getenv("PATH")
+                ? /* defaults to left side arg */
+                : (geteuid() == 0 ? _PATH_STDPATH : _PATH_DEFPATH);
+        char *q, *p;
+        char *filepath, *tmp;
+
+        if (!filename) {
+                errno = EINVAL;
+                return NULL;
+        }
+
+        if (strchr(filename, '/')) {
+                char *cwd;
+
+                cwd = getcwd(NULL, 0);
+                if (!cwd)
+                        return NULL;
+
+                filepath = calloc(sizeof(char),
+                                  strlen(cwd) + sizeof("/") + strlen(filename));
+                if (!filepath)
+                        return NULL;
+
+                tmp = stpcpy(filepath, cwd);
+                tmp = stpcpy(tmp, "/");
+                tmp = stpcpy(tmp, filename);
+
+                free(cwd);
+
+                if (!access(filepath, X_OK))
+                        return filepath;
+
+                free(filepath);
+                errno = ENOENT;
+                return NULL;
+        }
+
+        filepath = alloca(strlen(path) + sizeof("/") + strlen(filename));
+        if (!filepath)
+                err(2, "Could not allocate memory");
+
+        q = p = path;
+        for (q = path; q && q[0]; q = p + 1) {
+                p = strchrnul(q, ':');
+                if (p[0] == '\0')
+                        break;
+                p[0] = '\0';
+
+                if (!strcmp(q, "") || !strcmp(q, ".") || !strcmp(q, ".."))
+                        continue;
+
+                tmp = stpcpy(filepath, q);
+                tmp = stpcpy(tmp, "/");
+                tmp = stpcpy(tmp, filename);
+
+                if (!access(filepath, X_OK))
+                        return strdup(filepath);
+        }
+
+        errno = ENOENT;
+        return NULL;
 }
 
 int
 main(int argc, char *argv[])
 {
-        const char *cmd = NULL;
+        int cmd = -1;
+        char *filename = NULL;
 
-        for (int i = 0; i < argc; i++) {
+        for (int i = 1; i < argc; i++) {
                 char *arg = argv[i];
                 if (!strcmp(arg, "--help") || !strcmp(arg, "-h") ||
                     !strcmp(arg, "--usage") || !strcmp(arg, "-?"))
                         usage(0);
 
-                if (!cmd) {
-                        cmd = arg;
-                        continue;
+                if (cmd < 0) {
+                        cmd = i;
+                        break;
                 }
-
-                usage(1);
         }
 
-        if (!cmd)
+        if (cmd < 0)
                 usage(1);
+
+        filename = find_executable(argv[cmd]);
+        if (!filename)
+                err(2, "%s", argv[cmd]);
+
+        execvm(filename, &argv[cmd]);
 }
 
 // vim:fenc=utf-8:tw=75:et
