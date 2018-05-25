@@ -26,7 +26,10 @@ PKGS	=
           -Wl,-soname,$@.$(VERSION) \
           -o $@ $^ $(LDLIBS)
 
-gaol : | gaol.h compiler.h page.h list.h
+gaol.h : | compiler.h page.h list.h execvm.h
+
+gaol : execvm.c
+gaol : | gaol.h
 gaol : PKGS+=libelf
 
 clean :
