@@ -26,9 +26,8 @@ PKGS	=
           -Wl,-soname,$@.$(VERSION) \
           -o $@ $^ $(LDLIBS)
 
-gaol : | gaol.h relocate.h compiler.h page.h list.h
+gaol : | gaol.h compiler.h page.h list.h
 gaol : PKGS+=libelf
-gaol : relocate.c
 
 clean :
 	rm -vf $(TARGETS) *.E *.o *.a *.so

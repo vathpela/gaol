@@ -10,7 +10,5 @@
 #include "page.h"
 #include "list.h"
 
-#include "relocate.h"
-
 #endif /* !GAOL_H_ */
 // vim:fenc=utf-8:tw=75:et
