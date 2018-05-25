@@ -1,10 +1,10 @@
 /*
- * util.h
+ * compiler.h
  * Copyright 2018 Peter Jones <pjones@redhat.com>
  */
 
-#ifndef UTIL_H_
-#define UTIL_H_
+#ifndef COMPILER_H_
+#define COMPILER_H_
 
 #define unused __attribute__((__unused__))
 #define hidden __attribute__((__visibility__ ("hidden")))
@@ -21,5 +21,5 @@
 #define version(sym, ver) __asm__(".symver " # sym "," # ver)
 #define noreturn __attribute__((__noreturn__))
 
-#endif /* !UTIL_H_ */
+#endif /* !COMPILER_H_ */
 // vim:fenc=utf-8:tw=75:et

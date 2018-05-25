@@ -6,7 +6,7 @@
 #ifndef GAOL_H_
 #define GAOL_H_
 
-#include "util.h"
+#include "compiler.h"
 #include "relocate.h"
 
 #endif /* !GAOL_H_ */
