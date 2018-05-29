@@ -84,6 +84,7 @@ main(int argc, char *argv[])
 {
         int cmd = -1;
         char *filename = NULL;
+        int rc;
 
         for (int i = 1; i < argc; i++) {
                 char *arg = argv[i];
@@ -104,7 +105,11 @@ main(int argc, char *argv[])
         if (!filename)
                 err(2, "%s", argv[cmd]);
 
-        execvm(filename, &argv[cmd]);
+        rc = execvm(filename, &argv[cmd]);
+        free(filename);
+        if (rc < 0)
+                err(6, "Failure is always an option");
+        return rc;
 }
 
 // vim:fenc=utf-8:tw=75:et

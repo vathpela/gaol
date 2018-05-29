@@ -21,7 +21,7 @@
 
 #include "gaol.h"
 
-void noreturn hidden
+int hidden
 execvm(const char *filename, char * const argv[])
 {
         struct link_map *map_head = NULL, *map = NULL;
@@ -50,8 +50,9 @@ execvm(const char *filename, char * const argv[])
         execv(filename, argv);
         for (unsigned int i = 0; argv[i]; i++)
                 printf("%c%s", i == 0 ? '\0' : ' ', argv[i]);
-        printf("\n");
-        err(4, "Failure is always an option.");
+        rc = execv(filename, argv);
+err:
+        return rc;
 }
 
 // vim:fenc=utf-8:tw=75:et
