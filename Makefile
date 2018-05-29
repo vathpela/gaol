@@ -18,14 +18,6 @@ all: $(TARGETS)
 LDLIBS	+= -ldl
 PKGS	=
 
-% : %.c
-	$(CCLD) $(CCLDFLAGS) $(CPPFLAGS) -o $@ $^ $(LDLIBS)
-
-%.so :
-	$(CCLD) $(CCLDFLAGS) $(CPPFLAGS) $(SOFLAGS) \
-          -Wl,-soname,$@.$(VERSION) \
-          -o $@ $^ $(LDLIBS)
-
 gaol.h : | compiler.h page.h list.h execvm.h
 
 gaol : execvm.c

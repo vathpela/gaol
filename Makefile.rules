@@ -3,6 +3,20 @@
 # Peter Jones, 2018-05-16 13:48
 #
 
+% : %.c
+	$(CCLD) $(CCLDFLAGS) $(CPPFLAGS) -o $@ $^ $(LDLIBS)
+
+%.S : %.c
+	$(CCLD) $(CCLDFLAGS) $(CPPFLAGS) -S -o $@ $^
+
+%.E : %.c
+	$(CCLD) $(CCLDFLAGS) $(CPPFLAGS) -E -o $@ $^
+
+%.so :
+	$(CCLD) $(CCLDFLAGS) $(CPPFLAGS) $(SOFLAGS) \
+          -Wl,-soname,$@.$(VERSION) \
+          -o $@ $^ $(LDLIBS)
+
 pkg-config-cflags = \
 	$(shell if [ -n "$(PKGS)" ]; then $(PKG_CONFIG) --cflags $(PKGS); fi)
 pkg-config-ldflags = \
