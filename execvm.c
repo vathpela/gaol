@@ -34,7 +34,7 @@ struct proc_map {
         long long major, minor;
         unsigned long long ino;
 
-        char name[PATH_MAX];
+        char *name;
 
         struct list_head list;
 };
@@ -45,6 +45,9 @@ struct context {
         int vmid;
         long vcpu;
         struct kvm_run *run;
+        char *name;
+        int argc;
+        char **argv;
 
         list_t maps;
 };
@@ -62,6 +65,8 @@ free_maps(struct context *ctx)
                 struct proc_map *map = list_entry(pos, struct proc_map, list);
 
                 list_del(&map->list);
+                if (map->name)
+                        free(map->name);
                 free(map);
         }
 }
@@ -76,6 +81,8 @@ get_maps(struct context *ctx)
         struct proc_map *map;
         int fd;
         int ret = -1;
+
+        INIT_LIST_HEAD(&ctx->maps);
 
         fd = open("/proc/self/maps", O_RDONLY);
         if (fd < 0) {
@@ -97,6 +104,7 @@ get_maps(struct context *ctx)
         while ((idx = rindex((const char *)buf, '\n'))) {
                 char rwxp[5];
                 int spaceoff = 0, nameoff = 0, endoff = 0;
+                char pathbuf[PATH_MAX];
 
                 map = calloc(1, sizeof(*map));
                 if (!map)
@@ -135,8 +143,15 @@ get_maps(struct context *ctx)
                        map->pgoff, map->major, map->minor, map->ino,
                        idx + 1 + nameoff);
 #endif
-                char *tmp = stpncpy(&map->name[0], idx + 1 + nameoff, endoff-nameoff);
+                char *tmp = stpncpy(pathbuf, idx + 1 + nameoff, endoff-nameoff);
                 *tmp = '\0';
+
+                if (pathbuf[0] == '\0' || pathbuf[0] == '[')
+                        map->name = strdup(pathbuf);
+                else
+                        map->name = canonicalize_file_name(pathbuf);
+                if (!map->name)
+                        goto err;
 
                 list_add(&map->list, &ctx->maps);
 
@@ -213,8 +228,6 @@ init_kvm(struct context *ctx)
         if (ctx->fd >= 0)
                 return ctx->fd;
 
-        INIT_LIST_HEAD(&ctx->maps);
-
         ctx->fd = open("/dev/kvm", O_RDWR);
         if (ctx->fd < 0) {
                 warn("Could not get kvm fd");
@@ -234,10 +247,42 @@ err:
 }
 
 static int
-pick_and_place_dsos(struct context *ctx unused)
+pick_and_place_dsos(struct context *ctx)
 {
-        errno = ENOSYS;
-        return -1;
+        int rc = -1;
+        struct list_head *this;
+        struct kvm_userspace_memory_region kumr;
+
+        memset(&kumr, 0, sizeof(kumr));
+
+        list_for_each(this, &ctx->maps) {
+                struct proc_map *map;
+
+                map = list_entry(this, struct proc_map, list);
+                kumr.flags = (map->mode & M_W_OK) ? 0 : KVM_MEM_READONLY;
+                kumr.guest_phys_addr = map->start;
+                kumr.memory_size = map->end - map->start + 1;
+                kumr.userspace_addr = map->start;
+
+                printf("%"PRIx64"-%"PRIx64" %c%c%c%c %08llx %02llx:%02llx %llu %s\n",
+                       map->start, map->end,
+                       (map->mode & M_R_OK) ? 'r' : '-',
+                       (map->mode & M_W_OK) ? 'w' : '-',
+                       (map->mode & M_X_OK) ? 'x' : '-',
+                       (map->mode & M_P_OK) ? 'p' : 's',
+                       map->pgoff, map->major, map->minor, map->ino,
+                       map->name);
+
+                rc = ioctl(ctx->vmid, KVM_SET_USER_MEMORY_REGION, &kumr);
+                if (rc < 0)
+                        goto err;
+
+                kumr.slot += 1;
+        }
+
+        rc = 0;
+err:
+        return rc;
 }
 
 static int
@@ -252,13 +297,17 @@ make_vm(struct context *ctx)
         ctx->vcpu = -1;
         ctx->run = NULL;
 
+        rc = get_maps(ctx);
+        if (rc < 0)
+                goto err;
+
         if (init_kvm(ctx) < 0) {
                 goto err;
         }
 
         ctx->vmid = ioctl(ctx->fd, KVM_CREATE_VM, 0);
         if (ctx->vmid < 0) {
-                fprintf(stderr, "Could not make vm: %m\n");
+                warn("Could not make vm");
                 goto err;
         }
 
@@ -276,10 +325,6 @@ make_vm(struct context *ctx)
         }
 
         printf("vcpu: %ld\n", ctx->vcpu);
-
-        rc = get_maps(ctx);
-        if (rc < 0)
-                goto err;
 
         rc = pick_and_place_dsos(ctx);
         if (rc < 0)
@@ -339,6 +384,11 @@ execvm(const char *filename, char * const argv[])
 
         map = map_head;
         do {
+                if (map->l_name) {
+                        map->l_name = canonicalize_file_name(map->l_name);
+                        if (!map->l_name)
+                                goto err;
+                }
                 printf("%s at %p\n", map->l_name, (void *)(uintptr_t)map->l_addr);
                 map = map->l_next;
         } while (map && map != map_head);
