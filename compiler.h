@@ -20,6 +20,7 @@
 #define align(x) __attribute__((__align__(x)))
 #define version(sym, ver) __asm__(".symver " # sym "," # ver)
 #define noreturn __attribute__((__noreturn__))
+#define section(x) __attribute__((__section__(x)))
 
 #endif /* !COMPILER_H_ */
 // vim:fenc=utf-8:tw=75:et
