@@ -18,7 +18,7 @@ all: $(TARGETS)
 LDLIBS	+= -ldl
 PKGS	=
 
-gaol.h : | compiler.h page.h list.h execvm.h
+gaol.h : | compiler.h page.h list.h util.h execvm.h
 
 gaol : execvm.c
 gaol : | gaol.h

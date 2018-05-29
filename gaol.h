@@ -9,6 +9,7 @@
 #include "compiler.h"
 #include "page.h"
 #include "list.h"
+#include "util.h"
 
 #include "execvm.h"
 
