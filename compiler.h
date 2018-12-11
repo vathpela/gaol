@@ -17,10 +17,13 @@
 #define PRINTF(...) __attribute__((__format__(printf, __VA_ARGS__)))
 #define flatten __attribute__((__flatten__))
 #define packed __attribute__((__packed__))
-#define align(x) __attribute__((__align__(x)))
+#define aligned(x) __attribute__((__aligned__(x)))
 #define version(sym, ver) __asm__(".symver " # sym "," # ver)
 #define noreturn __attribute__((__noreturn__))
 #define section(x) __attribute__((__section__(x)))
+
+#define min(x, y) (((x) >= (y)) ? (y) : (x))
+#define max(x, y) (((x) > (y)) ? (x) : (y))
 
 #endif /* !COMPILER_H_ */
 // vim:fenc=utf-8:tw=75:et
