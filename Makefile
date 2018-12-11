@@ -30,7 +30,7 @@ guest.c : | compiler.h ioring.h
 guest : iorings.S ioring.c
 
 clean :
-	rm -vf $(TARGETS) *.E *.o *.a *.so
+	rm -vf $(TARGETS) *.E *.o *.a *.so core.* vgcore.*
 
 # vim:ft=make
 #

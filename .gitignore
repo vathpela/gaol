@@ -11,3 +11,4 @@ core.*
 cov-int
 gaol
 guest
+vgcore.*
