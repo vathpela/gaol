@@ -12,19 +12,19 @@ RANLIB		:= $(CROSS_COMPILE)gcc-ranlib
 
 COMMA		=,
 OPTIMIZE	?= -Og
-CFLAGS		?= $(OPTIMIZE) -g3 -flto
-CPPFLAGS	?= -std=gnu11 -fPIE -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 \
+CFLAGS		?= $(OPTIMIZE) -g3
+CPPFLAGS	?= -std=gnu11 -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 \
 		   -Wall -Werror -Wextra \
 		   -Wno-error=cpp -Wno-error=suggest-attribute=format \
 		   -Wno-suggest-attribute=format -Wno-missing-format-attribute \
 		   -Wno-missing-field-initializers \
 		   $(call pkg-config-cflags)
-CCLDFLAGS	= $(CFLAGS) -pie -fno-merge-constants \
+CCLDFLAGS	= $(CFLAGS) -fno-merge-constants \
 		  -Wl,--fatal-warnings,--no-allow-shlib-undefined \
-		  -Wl$(foreach x,$(subst -Og,-O0,$(OPTIMIZE)),$(COMMA)$(x)) -Wl,--no-undefined-version \
+		  -Wl$(foreach x,$(subst -Og,-O1,$(OPTIMIZE)),$(COMMA)$(x)) -Wl,--no-undefined-version \
 		  $(call pkg-config-ldflags)
 LDLIBS		+= $(foreach lib,$(LIBS),-l$(lib)) $(call pkg-config-ldlibs)
-SOFLAGS		= -shared
+SOFLAGS		= -fPIC -shared -Wl,-shared,-Bdynamic -no-pie -Wl,-no-pie -static-libgcc
 
 # vim:ft=make
 #

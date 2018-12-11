@@ -4,7 +4,7 @@
 #
 
 % : %.c
-	$(CCLD) $(CCLDFLAGS) $(CPPFLAGS) -o $@ $^ $(LDLIBS)
+	$(CCLD) $(CCLDFLAGS) -flto -pie -fPIE $(CPPFLAGS) -o $@ $^ $(LDLIBS)
 
 %.S : %.c
 	$(CCLD) $(CCLDFLAGS) $(CPPFLAGS) -S -o $@ $^
@@ -15,7 +15,10 @@
 %.so :
 	$(CCLD) $(CCLDFLAGS) $(CPPFLAGS) $(SOFLAGS) \
           -Wl,-soname,$@.$(VERSION) \
-          -o $@ $^ $(LDLIBS)
+          -o $@ $^
+
+%.o : %.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) -no-pie -fPIC -c -o $@ $^
 
 pkg-config-cflags = \
 	$(shell if [ -n "$(PKGS)" ]; then $(PKG_CONFIG) --cflags $(PKGS); fi)
