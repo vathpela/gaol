@@ -18,11 +18,16 @@ all: $(TARGETS)
 LDLIBS	+= -ldl
 PKGS	=
 
-gaol.h : | compiler.h page.h list.h util.h execvm.h
+gaol.h : | compiler.h page.h list.h util.h execvm.h ioring.h
 
-gaol : execvm.c
+gaol : execvm.c iorings.S ioring.c
 gaol : | gaol.h
 gaol : PKGS+=libelf
+
+ioring.c : | ioring.h iorings.S
+
+guest.c : | compiler.h ioring.h
+guest : iorings.S ioring.c
 
 clean :
 	rm -vf $(TARGETS) *.E *.o *.a *.so
