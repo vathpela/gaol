@@ -18,15 +18,10 @@ struct ioring {
 
 typedef struct ioring ioring;
 
-extern ioring enarx_input_ring__;
-extern ioring enarx_output_ring__;
-#if 0
-ioring *enarx_input_ring_p__ = &enarx_input_ring__;
-ioring *enarx_output_ring_p__ = &enarx_output_ring__;
-#else
-extern ioring *enarx_input_ring_p__;
-extern ioring *enarx_output_ring_p__;
-#endif
+ioring enarx_input_ring__;
+ioring enarx_output_ring__;
+ioring *enarx_input_ring_ptr__ = &enarx_input_ring__;
+ioring *enarx_output_ring_ptr__ = &enarx_output_ring__;
 
 static ioring *input, *output;
 
@@ -52,8 +47,8 @@ ioring_write(const char * const buf, size_t size)
         uint16_t start;
 
         if (!input || !output) {
-                input = enarx_input_ring_p__;
-                output = enarx_output_ring_p__;
+                input = enarx_input_ring_ptr__;
+                output = enarx_output_ring_ptr__;
         };
 
         /*
@@ -80,8 +75,8 @@ ioring_read(char * const buf, size_t size)
         uint16_t bytes;
 
         if (!input || !output) {
-                input = enarx_input_ring_p__;
-                output = enarx_output_ring_p__;
+                input = enarx_input_ring_ptr__;
+                output = enarx_output_ring_ptr__;
         };
 
         /*

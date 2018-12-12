@@ -20,14 +20,14 @@ PKGS	=
 
 gaol.h : | compiler.h page.h list.h util.h execvm.h ioring.h
 
-gaol : execvm.c iorings.S ioring.c
+gaol : execvm.c ioring.c
 gaol : | gaol.h
 gaol : PKGS+=libelf
 
-ioring.c : | ioring.h iorings.S
+ioring.c : | ioring.h
 
 guest.c : | compiler.h ioring.h
-guest : iorings.S ioring.c
+guest : ioring.c
 guest : CCLDFLAGS+=-Wl,--export-dynamic
 
 clean :
