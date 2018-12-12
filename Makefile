@@ -28,6 +28,7 @@ ioring.c : | ioring.h iorings.S
 
 guest.c : | compiler.h ioring.h
 guest : iorings.S ioring.c
+guest : CCLDFLAGS+=-Wl,--export-dynamic
 
 clean :
 	rm -vf $(TARGETS) *.E *.o *.a *.so core.* vgcore.*
