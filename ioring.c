@@ -4,34 +4,44 @@
  *
  */
 
-#include <string.h>
+#include <err.h>
 #include <errno.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <stdio.h>
 
-#include "compiler.h"
-#include "ioring.h"
-
-struct ioring {
-        uint16_t lock;
-        uint16_t size;
-        uint8_t buf[4096] aligned(4096);
-} packed aligned(4096);
+#include "gaol.h"
 
 typedef struct ioring ioring;
 
-ioring enarx_input_ring__;
-ioring enarx_output_ring__;
-ioring *enarx_input_ring_ptr__ = &enarx_input_ring__;
-ioring *enarx_output_ring_ptr__ = &enarx_output_ring__;
+struct iorings *iorings__ = NULL;
 
-static ioring *input, *output;
-
-void
-ioring_swap_rings(void)
+int
+ioring_map_rings(void)
 {
-        ioring *tmp = output;
+        if (iorings__)
+                return 0;
 
-        output = input;
-        input = tmp;
+        iorings__ = mmap(NULL, sizeof(*iorings__), PROT_READ|PROT_WRITE,
+                         MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+        if (iorings__ == MAP_FAILED) {
+                warn("mmap(NULL, %zd, PROT_READ|PROT_WRITE, MAP_SHARED_VALIDATE|MAP_ANONYMOUS, -1, 0) = MAP_FAILED",
+                     sizeof (*iorings__));
+                return -1;
+        }
+
+        printf("parent &iorings__: %p iorings__: %p\n", &iorings__, iorings__);
+        //dump_maps("parent");
+
+        iorings__->input = &iorings__->one;
+        iorings__->output = &iorings__->two;
+
+        msync(iorings__, sizeof(*iorings__), MS_ASYNC|MS_INVALIDATE);
+
+        printf("parent: input: %p output: %p\n", iorings__->input, iorings__->output);
+
+        return 0;
 }
 
 static void
@@ -45,12 +55,14 @@ int
 ioring_write(const char * const buf, size_t size)
 {
         uint16_t start;
+        ioring *output;
 
-        if (!input || !output) {
-                input = enarx_input_ring_ptr__;
-                output = enarx_output_ring_ptr__;
-        };
+        if (!iorings__ || !iorings__->output) {
+                errno = EINVAL;
+                return -1;
+        }
 
+        output = iorings__->output;
         /*
          * yes yes, this spinlock isn't real. just need something that
          * mostly works and is static, for now
@@ -58,6 +70,7 @@ ioring_write(const char * const buf, size_t size)
         while (output->lock)
                 stall(1000);
         output->lock = 1;
+        msync(output, sizeof(*output), MS_ASYNC|MS_INVALIDATE);
 
         start = output->size;
         if (sizeof(output->buf) - start > size)
@@ -73,12 +86,14 @@ int
 ioring_read(char * const buf, size_t size)
 {
         uint16_t bytes;
+        ioring *input;
 
-        if (!input || !output) {
-                input = enarx_input_ring_ptr__;
-                output = enarx_output_ring_ptr__;
-        };
+        if (!iorings__ || !iorings__->input) {
+                errno = EINVAL;
+                return -1;
+        }
 
+        input = iorings__->input;
         /*
          * yes yes, this spinlock isn't real. just need something that
          * mostly works and is static, for now

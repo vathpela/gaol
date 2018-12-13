@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 
 #include "gaol.h"
 
@@ -84,7 +85,8 @@ main(int argc, char *argv[])
 {
         int cmd = -1;
         char *filename = NULL;
-        int rc;
+        int rc = -1;
+        pid_t vmid;
 
         for (int i = 1; i < argc; i++) {
                 char *arg = argv[i];
@@ -105,10 +107,15 @@ main(int argc, char *argv[])
         if (!filename)
                 err(2, "%s", argv[cmd]);
 
-        rc = execvm(filename, &argv[cmd]);
+        rc = vmid = forkvm(filename, &argv[cmd]);
         free(filename);
+        if (vmid < 0) {
+                warnx("Could not fork vm");
+        }
+
         if (rc < 0)
-                err(6, "Failure is always an option");
+                errx(6, "Failure is always an option");
+
         return rc;
 }
 

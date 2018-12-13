@@ -9,48 +9,70 @@
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <ffi.h>
 #include <gelf.h>
 #include <inttypes.h>
 #include <link.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
-#include <linux/kvm.h>
 
 #include "gaol.h"
+#include "ioring.h"
 
-struct proc_map {
-        uintptr_t start;
-        uintptr_t end;
+#include "dump.h"
 
-        int mode;
+#define SKIP_SEV
+static LIST_HEAD(contexts);
 
-        long long pgoff;
-        long long major, minor;
-        unsigned long long ino;
+static struct context *
+new_vm_ctx(void)
+{
+        struct context *ctx;
 
-        char *name;
+        ctx = calloc(1, sizeof (*ctx));
+        if (!ctx)
+                return NULL;
 
-        struct list_head list;
-};
+        ctx->pid = -1;
+        ctx->kvm = -1;
+        ctx->sev = -1;
 
-struct context {
-        int fd;
-        ssize_t size;
-        int vmid;
-        long vcpu;
-        struct kvm_run *run;
-        char *name;
-        int argc;
-        char **argv;
+        ctx->vm = -1;
+        ctx->vm_identity_map = (uintptr_t)MAP_FAILED;
+        ctx->vm_tss = (uintptr_t)MAP_FAILED;
 
-        list_t maps;
-};
+        ctx->vcpu = -1;
+        ctx->vcpu_mmap_size = -1;
+
+        ctx->run = NULL;
+
+        INIT_LIST_HEAD(&ctx->host_maps);
+        INIT_LIST_HEAD(&ctx->guest_maps);
+        INIT_LIST_HEAD(&ctx->symbols);
+
+        list_add(&ctx->list, &contexts);
+
+        return ctx;
+}
+
+static unused struct context *
+get_ctx(pid_t pid)
+{
+        struct list_head *n, *pos;
+
+        errno = 0;
+        list_for_each_safe(pos, n, &contexts) {
+                struct context *ctx = list_entry(pos, struct context, list);
+                printf("%s(): found pid %d\n", __func__, ctx->pid);
+                if (ctx->pid == pid)
+                        return ctx;
+        }
+        errno = ESRCH;
+        return NULL;
+}
 
 #define M_R_OK 1
 #define M_W_OK 2
@@ -58,21 +80,57 @@ struct context {
 #define M_P_OK 8
 
 static void
-free_maps(struct context *ctx)
+free_maps(struct context *ctx, struct list_head *head)
 {
         struct list_head *n, *pos;
-        list_for_each_safe(pos, n, &ctx->maps) {
+        list_for_each_safe(pos, n, head) {
                 struct proc_map *map = list_entry(pos, struct proc_map, list);
+
+                if (map->kumr.memory_size != 0) {
+                        map->kumr.memory_size = 0;
+                        vm_ioctl(ctx, KVM_SET_USER_MEMORY_REGION, &map->kumr);
+                }
 
                 list_del(&map->list);
                 if (map->name)
                         free(map->name);
                 free(map);
         }
+
+        INIT_LIST_HEAD(head);
+}
+
+static bool
+should_canonicalize(const char * const pathname)
+{
+        struct {
+                const bool valid;
+                const char * const path;
+                const bool uselen;
+        } nocopy[] = {
+                { true, "[", true },
+                { true, "anon_inode:kvm-vcpu:", true },
+                { true, "\0", false },
+                { false, NULL, false }
+        };
+        bool found = false;
+
+        for (unsigned int i = 0; found == false && nocopy[i].valid; i++) {
+                if (nocopy[i].uselen) {
+                        if (!strncmp(nocopy[i].path, pathname,
+                                     strlen(nocopy[i].path)))
+                                found = true;
+                } else {
+                        if (!strcmp(nocopy[i].path, pathname))
+                                found = true;
+                }
+        }
+
+        return !found;
 }
 
 static int
-get_maps(struct context *ctx)
+get_host_maps(struct context *ctx)
 {
         int rc;
         uint8_t *buf = NULL;
@@ -82,18 +140,19 @@ get_maps(struct context *ctx)
         int fd;
         int ret = -1;
 
-        INIT_LIST_HEAD(&ctx->maps);
-
         fd = open("/proc/self/maps", O_RDONLY);
         if (fd < 0) {
+                warn("open(\"/proc/self/maps\", O_RDONLY) failed");
                 errno = 0;
                 return -1;
         }
 
         rc = read_file(fd, &buf, &bufsize);
         close(fd);
-        if (rc < 0)
+        if (rc < 0) {
+                warn("read_file(%d, %p, %p) failed", fd, &buf, &bufsize);
                 return -1;
+        }
 
         idx = rindex((const char *)buf, '\n');
         if (!idx)
@@ -107,8 +166,10 @@ get_maps(struct context *ctx)
                 char pathbuf[PATH_MAX];
 
                 map = calloc(1, sizeof(*map));
-                if (!map)
+                if (!map) {
+                        warn("calloc(1, %zd) failed", sizeof(*map));
                         goto err;
+                }
 
                 rc = sscanf(idx + 1,
                             "%"PRIx64"-%"PRIx64" %[rwxps-] %llx %02llx:%02llx"
@@ -146,14 +207,21 @@ get_maps(struct context *ctx)
                 char *tmp = stpncpy(pathbuf, idx + 1 + nameoff, endoff-nameoff);
                 *tmp = '\0';
 
-                if (pathbuf[0] == '\0' || pathbuf[0] == '[')
-                        map->name = strdup(pathbuf);
-                else
+                if (should_canonicalize(pathbuf)) {
                         map->name = canonicalize_file_name(pathbuf);
-                if (!map->name)
-                        goto err;
+                        if (!map->name) {
+                                warn("canonicalizing \"%s\" failed", pathbuf);
+                                goto err;
+                        }
+                } else {
+                        map->name = strdup(pathbuf);
+                        if (!map->name) {
+                                warn("strdup() failed");
+                                goto err;
+                        }
+                }
 
-                list_add(&map->list, &ctx->maps);
+                list_add(&map->list, &ctx->host_maps);
 
                 idx[0] = '\0';
         }
@@ -175,11 +243,313 @@ get_maps(struct context *ctx)
 
         ret = 0;
 err:
-        if (ret < 0)
-                free_maps(ctx);
         free(buf);
         return ret;
 }
+
+static int
+make_guest_maps(struct context *ctx)
+{
+        int rc;
+        struct link_map *map_head = NULL, *map = NULL;
+        struct list_head *this, *n;
+        list_t new_maps;
+
+        INIT_LIST_HEAD(&new_maps);
+
+        rc = dlinfo(ctx->phandle, RTLD_DI_LINKMAP, &map_head);
+        if (rc < 0) {
+                fflush(stdout);
+                warnx("Could not get link map: %s", dlerror());
+                goto err;
+        }
+
+#if 0
+        dump_maps("guest");
+
+#endif
+        printf("Finding guest maps\n");
+        list_for_each(this, &ctx->host_maps) {
+                struct proc_map *host_map;
+                struct proc_map *guest_map;
+
+                host_map = list_entry(this, struct proc_map, list);
+#if 0
+                printf("finding maps for \"%s\" at %p-%p\n", host_map->name, (void *)host_map->start, (void *)host_map->end);
+#endif
+
+                map = map_head;
+                do {
+                        char *new_name = NULL;
+                        uintptr_t start = map->l_addr;
+                        long long offset;
+                        if (map->l_name) {
+                                new_name = canonicalize_file_name(map->l_name);
+                                if (!new_name) {
+                                        fflush(stdout);
+                                        warn("canonicalize_file_name(%s) failed", map->l_name);
+                                        goto err;
+                                }
+                        }
+
+                        if (host_map->start != start) {
+                                //printf("no\n");
+                                map = map->l_next;
+                                continue;
+                        }
+                        if (strcmp(host_map->name, map->l_name) &&
+                            strcmp(host_map->name, new_name)) {
+                                //printf("no\n");
+                                map = map->l_next;
+                                continue;
+                        }
+
+                        offset = host_map->pgoff;
+
+#if 0
+                        printf(" %s && %p == %p ? ",
+                               map->l_name,
+                               (void *)host_map->start,
+                               (void *)map->l_addr);
+
+                        printf("yes\n");
+#endif
+
+/*
+ * Unfortunately dlinfo(handle, RTLD_DI_LINKMAP, &map) is more or less
+ * completely defective in two major ways:
+ *
+ * 1) link.h says:
+ *      char *l_name; // Absolute file name object was found in.
+ *    but the name there has not been canonicalized
+ *
+ * 2) link.h says:
+ *      ElfW(Addr) l_addr; // Difference between the address in the ELF file
+ *                         // and the addresses in memory.
+ *    Thankfully, this actually appears to be the load address rather than
+ *    the /difference/, but it's just the address the first chunk was
+ *    mmap()ed at, and it doesn't give you entries for the other maps, nor
+ *    a full size, so there's no way to disambiguate whether the next
+ *    mappings in /proc/<pid>/maps are from this map or from some other map
+ *    (possibly in the link map and possibly not) if they're the same file.
+ *    Moreover, you can't use /proc/<pid>/maps' pgoff plus start addresses,
+ *    because you can't tell if the file was mmap()ed twice in contiguous
+ *    locations, and if for some reason there are gaps (unmapped regions),
+ *    you can't tell that's not the end of the mapping.
+ *
+ *    It might be possible to rectify this by using dl_iterate_phdr() to
+ *    find the program headers and actually trying to parse the ELF and
+ *    match it up ourselves.  But that really just speaks to how defective
+ *    this is to begin with.
+ *
+ *    Anyway, below is the known-defective pgoff/start matching technique
+ *    described above, except sometimes I see this in proc:
+ *
+ * 0484f000-04850000 r--p 00000000 fd:00 30506907 /path/to/process
+ * 04850000-04851000 r-xp 00001000 fd:00 30506907 /path/to/process
+ * 04851000-04852000 r--p 00002000 fd:00 30506907 /path/to/process < this pgoff
+ * 04852000-04853000 r--p 00002000 fd:00 30506907 /path/to/process < this pgoff
+ * 04853000-04854000 rw-p 00003000 fd:00 30506907 /path/to/process
+ *
+ *    I don't know why I'm seeing that, but in any case, I'm just pgoff <=
+ *    instead of ==, which once again introduces an error case with
+ *    contiguously loaded maps from the same file.
+ */
+                        struct list_head *that = this;
+                        while (that) {
+                                struct proc_map *proc_map;
+
+                                proc_map = list_entry(that, struct proc_map,
+                                                      list);
+                                if (strcmp(host_map->name, proc_map->name) ||
+                                    start != proc_map->start ||
+                                    offset < proc_map->pgoff) {
+                                        map = NULL;
+                                        break;
+                                }
+
+                                guest_map = calloc(1, sizeof(*guest_map));
+                                if (!guest_map) {
+                                        warn("Could not allocate guest map record");
+                                        goto err;
+                                }
+
+                                memcpy(guest_map, proc_map, sizeof(*guest_map));
+                                list_add(&guest_map->list, &new_maps);
+                                guest_map->name = strdup(guest_map->name);
+                                if (!guest_map->name) {
+                                        warn("Could not allocate guest map name");
+                                        goto err;
+                                }
+
+                                printf("  %"PRIx64"-%"PRIx64" %c%c%c%c %08llx %02llx:%02llx %llu %s\n",
+                                       guest_map->start, guest_map->end,
+                                       (guest_map->mode & M_R_OK) ? 'r' : '-',
+                                       (guest_map->mode & M_W_OK) ? 'w' : '-',
+                                       (guest_map->mode & M_X_OK) ? 'x' : '-',
+                                       (guest_map->mode & M_P_OK) ? 'p' : 's',
+                                       guest_map->pgoff, guest_map->major, guest_map->minor, guest_map->ino,
+                                       guest_map->name);
+
+                                start = proc_map->end;
+                                offset = proc_map->end - host_map->start;
+                                that = that->next;
+                        }
+                } while (map && map != map_head);
+        }
+
+        list_for_each_safe(this, n, &new_maps) {
+                struct proc_map *guest_map;
+
+                guest_map = list_entry(this, struct proc_map, list);
+                list_del(&guest_map->list);
+                list_add(&guest_map->list, &ctx->guest_maps);
+        }
+        return 0;
+err:
+        return -1;
+}
+
+static void
+free_symbols(struct context *ctx)
+{
+        struct list_head *n, *pos;
+        list_for_each_safe(pos, n, &ctx->symbols) {
+                struct symbol *sym = list_entry(pos, struct symbol, list);
+
+                list_del(&sym->list);
+                if (sym->name)
+                        free(sym->name);
+                free(sym);
+        }
+
+        INIT_LIST_HEAD(&ctx->symbols);
+}
+
+static int
+add_symbol(struct context *ctx, const char * const name)
+{
+        struct symbol *sym;
+        int ret = -1;
+        void *object = NULL;
+
+        sym = calloc(1, sizeof(*sym));
+        if (!sym)
+                goto err;
+
+        sym->name = strdup(name);
+        if (!sym->name)
+                goto err;
+
+        object = dlsym(ctx->phandle, name);
+        printf("dlsym(%p, \"%s\") -> %p\n", ctx->phandle, name, object);
+        //if (!object)
+        //        printf("dlsym(%p, \"%s\") failed: %s\n", ctx->phandle, names[i], dlerror());
+
+        sym->addr = (uintptr_t)object;
+        //printf("Adding symbol '%s' at %p\n", name, (void *)object);
+
+        list_add(&sym->list, &ctx->symbols);
+
+        ret = 0;
+err:
+        if (ret < 0 && sym) {
+                if (sym->name)
+                        free(sym->name);
+                free(sym);
+        }
+
+        return ret;
+}
+
+static void *
+get_symbol(struct context *ctx, const char * const name)
+{
+        struct list_head *pos;
+        list_for_each(pos, &ctx->symbols) {
+                struct symbol *sym = list_entry(pos, struct symbol, list);
+
+                if (!strcmp(sym->name, name))
+                        return sym;
+        }
+
+        return NULL;
+}
+
+static void *
+get_symbol_object(struct context *ctx, const char * const name)
+{
+        struct symbol *sym = get_symbol(ctx, name);
+        void *object = NULL;
+
+        if (sym == NULL && add_symbol(ctx, name) >= 0)
+                sym = get_symbol(ctx, name);
+
+        if (sym)
+                object = (void *)sym->addr;
+
+        return object;
+}
+
+static uintptr_t
+get_symbol_guest_object(struct context *ctx, const char * const name)
+{
+        uintptr_t object;
+        uintptr_t guest_object = 0;
+
+        object = (uintptr_t)get_symbol_object(ctx, name);
+        if (!object) {
+                warnx("Could not find symbol \"%s\"", name);
+                return 0;
+        }
+
+        struct list_head *pos;
+        list_for_each(pos, &ctx->guest_maps) {
+                struct proc_map *map = list_entry(pos, struct proc_map, list);
+
+                if (map->start > object || object > map->end)
+                        continue;
+
+                /*
+                 * right now we're keeping the guest aliased to the host
+                 * userspace addresses, so this isn't strictly necessary,
+                 * but it's worth having anyway in case we want to change
+                 * that later.
+                 */
+                guest_object = object - map->kumr.userspace_addr + map->start;
+                break;
+        }
+
+        return guest_object;
+}
+
+#if 0
+static int
+add_symbols(struct context *ctx)
+{
+        int ret = -1;
+        int i;
+        const char * const names[] = {
+                "enarx_input_ring_ptr__",
+                "enarx_output_ring_ptr__",
+                ""
+        };
+
+
+        for (i = 0; names[i][0] != 0; i++) {
+                ret = add_symbol(ctx, names[i]);
+                if (ret < 0)
+                        goto err;
+        }
+
+        ret = 0;
+err:
+        if (ret != 0)
+                free_symbols(ctx);
+
+        return ret;
+}
+#endif
 
 static unused struct r_debug *
 find_r_debug(void)
@@ -198,52 +568,45 @@ find_r_debug(void)
 static void
 destroy_vm(struct context *ctx)
 {
-        if (ctx->fd < 0)
+        if (!ctx)
                 return;
 
         if (ctx->vcpu >= 0) {
                 ctx->run->immediate_exit = 1;
-                ioctl(ctx->vcpu, KVM_RUN, 0);
+#if 0
+                /* this hangs the task in the error cases, and the guest
+                 * seems to go away correctly without it, so... */
+                printf("%d doing KVM_RUN\n", __LINE__);
+                vcpu_ioctl(ctx, KVM_RUN, 0);
+#endif
                 close(ctx->vcpu);
         }
 
-        if (!list_empty(&ctx->maps))
-            free_maps(ctx);
+        if (!list_empty(&ctx->symbols))
+                free_symbols(ctx);
 
-        if (ctx->vmid >= 0)
-                close(ctx->vmid);
+        free_maps(ctx, &ctx->host_maps);
+        free_maps(ctx, &ctx->guest_maps);
+
+        if (ctx->vm >= 0)
+                close(ctx->vm);
 
         if (ctx->run) {
-                munmap(ctx->run, ctx->size);
+                munmap(ctx->run, ctx->vcpu_mmap_size);
                 ctx->run = NULL;
         }
-        ctx->size = -1;
-        close(ctx->fd);
-        ctx->fd = -1;
-}
 
-static int
-init_kvm(struct context *ctx)
-{
-        if (ctx->fd >= 0)
-                return ctx->fd;
-
-        ctx->fd = open("/dev/kvm", O_RDWR);
-        if (ctx->fd < 0) {
-                warn("Could not get kvm fd");
-                goto err;
+        if (ctx->sev >= 0) {
+                close(ctx->sev);
+                ctx->sev = -1;
         }
 
-        ctx->size = ioctl(ctx->fd, KVM_GET_VCPU_MMAP_SIZE, 0);
-        if (ctx->size < 0) {
-                warn("Could not get vcpu mmap size");
-                goto err;
+        if (ctx->kvm >= 0) {
+                close(ctx->kvm);
+                ctx->kvm = -1;
         }
 
-        return 0;
-err:
-        destroy_vm(ctx);
-        return -1;
+        ctx->vcpu_mmap_size = -1;
 }
 
 static int
@@ -251,20 +614,15 @@ pick_and_place_dsos(struct context *ctx)
 {
         int rc = -1;
         struct list_head *this;
-        struct kvm_userspace_memory_region kumr;
+        uint32_t slot = 0;
 
-        memset(&kumr, 0, sizeof(kumr));
-
-        list_for_each(this, &ctx->maps) {
+        printf("Adding guest maps\n");
+        list_for_each(this, &ctx->guest_maps) {
                 struct proc_map *map;
 
                 map = list_entry(this, struct proc_map, list);
-                kumr.flags = (map->mode & M_W_OK) ? 0 : KVM_MEM_READONLY;
-                kumr.guest_phys_addr = map->start;
-                kumr.memory_size = map->end - map->start + 1;
-                kumr.userspace_addr = map->start;
 
-                printf("%"PRIx64"-%"PRIx64" %c%c%c%c %08llx %02llx:%02llx %llu %s\n",
+                printf("  %"PRIx64"-%"PRIx64" %c%c%c%c %08llx %02llx:%02llx %llu %s",
                        map->start, map->end,
                        (map->mode & M_R_OK) ? 'r' : '-',
                        (map->mode & M_W_OK) ? 'w' : '-',
@@ -273,11 +631,38 @@ pick_and_place_dsos(struct context *ctx)
                        map->pgoff, map->major, map->minor, map->ino,
                        map->name);
 
-                rc = ioctl(ctx->vmid, KVM_SET_USER_MEMORY_REGION, &kumr);
-                if (rc < 0)
-                        goto err;
+                if (!strcmp(map->name, "[vvar]") ||
+                    !strcmp(map->name, "[vdso]") ||
+                    !strcmp(map->name, "[vsyscall]")) {
+                        printf (" (skipping)\n");
+                        continue;
+                }
 
-                kumr.slot += 1;
+                printf("\n");
+
+                map->kumr.slot = slot++;
+                map->kumr.flags = (map->mode & M_W_OK) ? 0 : KVM_MEM_READONLY;
+                map->kumr.guest_phys_addr = ctx->vm_phys_base + map->start;
+                map->kumr.memory_size = map->end - map->start;
+                map->kumr.userspace_addr = map->start;
+
+                printf("  -> as phys:%p-%p virt:%p-%p\n",
+                       (void *)map->kumr.guest_phys_addr,
+                       (void *)map->kumr.guest_phys_addr+map->kumr.memory_size,
+                       (void *)map->kumr.userspace_addr,
+                       (void *)map->kumr.userspace_addr+map->kumr.memory_size);
+                fflush(stdout);
+
+                rc = vm_ioctl(ctx, KVM_SET_USER_MEMORY_REGION, &map->kumr);
+                if (rc < 0) {
+                        map->kumr.slot = -1;
+                        map->kumr.flags = 0;
+                        map->kumr.guest_phys_addr = 0;
+                        map->kumr.memory_size = 0;
+                        map->kumr.userspace_addr = 0;
+                        warn("KVM_SET_USER_MEMORY_REGION failed");
+                        goto err;
+                }
         }
 
         rc = 0;
@@ -285,128 +670,299 @@ err:
         return rc;
 }
 
-static int
-make_vm(struct context *ctx)
+static inline int
+init_sev(struct context *ctx unused)
 {
-        unsigned long cpuid = 0;
-        int rc = -1;
+#ifdef SKIP_SEV
+        return 0;
+#else
+        struct sev_user_data_status status;
+        int sev_err = 0;
+        int rc;
 
-        ctx->fd = -1;
-        ctx->size = -1;
-        ctx->vmid = -1;
-        ctx->vcpu = -1;
-        ctx->run = NULL;
-
-        rc = get_maps(ctx);
-        if (rc < 0)
-                goto err;
-
-        if (init_kvm(ctx) < 0) {
+        ctx->sev = open("/dev/sev", O_RDWR);
+        if (ctx->sev < 0) {
+                warn("Could not get SEV fd");
                 goto err;
         }
 
-        ctx->vmid = ioctl(ctx->fd, KVM_CREATE_VM, 0);
-        if (ctx->vmid < 0) {
+        memset(&status, 0, sizeof(status));
+
+        rc = sev_ioctl(ctx, SEV_PLATFORM_STATUS, &status, &sev_err);
+        if (rc < 0) {
+                warn("Could not initialize SEV (fw_error:%d)", sev_err);
+                goto err;
+        }
+
+err:
+        return rc;
+#endif
+}
+
+static struct context *
+set_up_vm(void)
+{
+        unsigned long cpuid = 0;
+        struct context *ctx;
+        int rc;
+
+        /* PJFIX: just for debugging for now, and this is the earliest
+         * common path to stick it on */
+        setlinebuf(stdout);
+        setlinebuf(stderr);
+
+        ctx = new_vm_ctx();
+        if (ctx == NULL)
+                return NULL;
+
+        ctx->kvm = open("/dev/kvm", O_RDWR);
+        if (ctx->kvm < 0) {
+                warn("Could not get kvm fd");
+                goto err;
+        }
+
+        ctx->vm = kvm_ioctl(ctx, KVM_CREATE_VM, 0);
+        if (ctx->vm < 0) {
                 warn("Could not make vm");
                 goto err;
         }
 
-        ctx->vcpu = ioctl(ctx->vmid, KVM_CREATE_VCPU, cpuid);
+        /* PJFIX: check capabilities */
+        ctx->vm_identity_map = 0x100000000 - (PAGE_SIZE << 2);
+        printf("Setting vm_identity_map to %p\n", (void *)ctx->vm_identity_map);
+        fflush(stdout);
+        rc = vm_ioctl(ctx, KVM_SET_IDENTITY_MAP_ADDR, &ctx->vm_identity_map);
+        if (rc < 0) {
+                warn("Could not set vm identity map address");
+                goto err;
+        }
+
+        /* PJFIX: check capabilities */
+        ctx->vm_tss = ctx->vm_identity_map + PAGE_SIZE;
+        printf("Setting vm_tss to %p\n", (void *)ctx->vm_tss);
+        fflush(stdout);
+        rc = vm_ioctl(ctx, KVM_SET_TSS_ADDR, ctx->vm_tss);
+        if (rc < 0) {
+                warn("Could not set vm tss address");
+                goto err;
+        }
+
+        ctx->vm_phys_base = ctx->vm_identity_map + (PAGE_SIZE << 2);
+
+        ctx->vcpu = vm_ioctl(ctx, KVM_CREATE_VCPU, cpuid);
         if (ctx->vcpu < 0) {
-                fprintf(stderr, "Could not make vcpu: %m\n");
+                warn("Could not make vcpu");
                 goto err;
         }
 
-        ctx->run = mmap(NULL, ctx->size, PROT_READ|PROT_WRITE,
-                       MAP_PRIVATE, ctx->vcpu, 0);
+        ctx->vcpu_mmap_size = kvm_ioctl(ctx, KVM_GET_VCPU_MMAP_SIZE, 0);
+        if (ctx->vcpu_mmap_size < 0) {
+                warn("Could not get vcpu mmap size");
+                goto err;
+        }
+
+        ctx->run = mmap(NULL, ctx->vcpu_mmap_size, PROT_READ|PROT_WRITE,
+                        MAP_PRIVATE, ctx->vcpu, 0);
         if (ctx->run == MAP_FAILED) {
-                warn("Could not get vcpu kvm_run");
+                warn("Could not map vcpu runtime controls");
                 goto err;
         }
 
-        printf("vcpu: %ld\n", ctx->vcpu);
+        ctx->vcpu_tsc_khz = vcpu_ioctl(ctx, KVM_GET_TSC_KHZ, 0);
+        if (ctx->vcpu_tsc_khz < 0)
+                warn("KVM_GET_TSC_KHZ failed?");
 
-        rc = pick_and_place_dsos(ctx);
+        printf("vcpu: %ld at %dkHZ\n", ctx->vcpu, ctx->vcpu_tsc_khz);
+
+        rc = vm_ioctl(ctx, KVM_GET_CLOCK, &ctx->vm_clock);
         if (rc < 0)
-                goto err;
+                warn("Couldn't get vm clock");
 
-        return 0;
+        printf("Current tsc: %llu\n", ctx->vm_clock.clock);
+
+        if (ioring_map_rings() < 0) {
+                warnx("Could not map IO rings");
+                goto err;
+        }
+        extern struct iorings *iorings__;
+        printf("iorings__: %p\n", iorings__);
+        fflush(stdout);
+
+        return ctx;
 err:
         destroy_vm(ctx);
-        return -1;
+        return NULL;
 }
 
-static void unused
-dump_maps(void)
-{
-        char *buf;
-        int fd;
+typedef int (*entry)(const char *filename, char * const argv[]);
+typedef void (*ffi_fn)(void);
 
-        fd = open("/proc/self/maps", O_RDONLY);
-        if (fd < 0) {
-                errno = 0;
-                return;
-        }
-        fflush(stdout);
-        while (read(fd, &buf, 1) == 1)
-                write(STDOUT_FILENO, &buf, 1);
-        close(fd);
-}
-
-int hidden
-execvm(const char *filename, char * const argv[])
+vmid_t hidden
+forkvm(const char *filename, char * const argv[] unused)
 {
-        struct link_map *map_head = NULL, *map = NULL;
-        void *phandle;
-        Lmid_t lmid;
         int rc = -1;
-        struct context ctx = {
-                .fd = -1,
-        };
+        struct context *ctx;
+        Lmid_t lmid;
 
-        phandle = dlmopen(LM_ID_NEWLM, filename, RTLD_LOCAL|RTLD_NOW);
-        if (!phandle) {
+        ctx = set_up_vm();
+        if (ctx == NULL) {
+                warnx("Could not set up VM");
+                return -1;
+        }
+
+        ctx->phandle = dlmopen(LM_ID_NEWLM, filename, RTLD_LOCAL|RTLD_NOW);
+        if (!ctx->phandle) {
                 warnx("dlmopen() failed: %s", dlerror());
                 goto err;
         }
+        printf("dlmopen(LM_ID_NEWLM, \"%s\", RTLD_LOCAL|RTLD_NOW) -> %p\n",
+               filename, ctx->phandle);
 
-        rc = dlinfo(phandle, RTLD_DI_LMID, &lmid);
+        rc = dlinfo(ctx->phandle, RTLD_DI_LMID, &lmid);
         if (rc < 0) {
                 warnx("Could not get link map ID: %s", dlerror());
                 goto err;
         }
+        printf("link map id: %lu\n", lmid);
 
-        rc = dlinfo(phandle, RTLD_DI_LINKMAP, &map_head);
+#if 0
+        rc = add_symbols(ctx);
         if (rc < 0) {
-                warnx("Could not get link map: %s", dlerror());
+                warnx("add_symbols failed");
+                goto err;
+        }
+#endif
+
+        extern struct iorings *iorings__;
+        struct iorings **iorings = get_symbol_object(ctx, "iorings__");
+
+        printf("old child &iorings__: %p iorings__: %p\n", iorings, *iorings);
+        *iorings = iorings__;
+        msync(*iorings, sizeof(*iorings), MS_ASYNC|MS_INVALIDATE);
+        printf("new child &iorings__: %p iorings__: %p\n", iorings, *iorings);
+
+        //dump_maps("child");
+
+        printf("child before: input: %p output: %p\n", (*iorings)->input, (*iorings)->output);
+        (*iorings)->input = iorings__->output;
+        (*iorings)->output = iorings__->input;
+        msync(iorings, sizeof((*iorings)), MS_ASYNC|MS_INVALIDATE);
+        printf("child after: input: %p output: %p\n", (*iorings)->input, (*iorings)->output);
+
+        rc = get_host_maps(ctx);
+        if (rc < 0) {
+                warnx("get_host_maps() failed");
                 goto err;
         }
 
-        map = map_head;
-        do {
-                if (map->l_name) {
-                        map->l_name = canonicalize_file_name(map->l_name);
-                        if (!map->l_name)
-                                goto err;
-                }
-                printf("%s at %p\n", map->l_name, (void *)(uintptr_t)map->l_addr);
-                map = map->l_next;
-        } while (map && map != map_head);
-
-        rc = make_vm(&ctx);
+        rc = make_guest_maps(ctx);
         if (rc < 0) {
-                warn("make_vm() failed");
+                warnx("make_guest_maps() failed");
                 goto err;
         }
 
-        rc = ioctl(ctx.vcpu, KVM_RUN, 0);
-        printf("KVM_RUN: %d: %m\n", rc);
+        rc = pick_and_place_dsos(ctx);
+        if (rc < 0) {
+                warnx("pick_and_place_dsos() failed");
+                goto err;
+        }
 
-        for (unsigned int i = 0; argv[i]; i++)
-                printf("%c%s", i == 0 ? '\0' : ' ', argv[i]);
+        rc = init_sev(ctx);
+        if (rc < 0) {
+                warnx("Could not initialize SEV");
+                goto err;
+        }
+
+#if 0
+//        for (unsigned int i = 0; argv[i]; i++)
+//                printf("%c%s", i == 0 ? '\0' : ' ', argv[i]);
+        fflush(stdout);
+        fflush(stderr);
+        fsync(STDOUT_FILENO);
+        fdatasync(STDOUT_FILENO);
+        fsync(STDERR_FILENO);
+        fdatasync(STDERR_FILENO);
         rc = execv(filename, argv);
+        if (rc < 0)
+                warn("execv(\"%s\", [...]) failed", filename);
+#elif 0
+        ffi_cif cif;
+        ffi_status ffi_status;
+        ffi_type **arg_types;
+        ffi_sarg result;
+        void **arg_values;
+        unsigned int argc;
+        entry fn = NULL;
+
+        for (argc = 0; argv[argc] != NULL; argc++)
+                ;
+
+        arg_types = calloc(argc, sizeof(ffi_type *));
+        if (!arg_types) {
+                warn("Could not allocate argument type array");
+                goto err;
+        }
+        arg_values = calloc(argc, sizeof(void *));
+        if (!arg_values) {
+                warn("Could not allocate argument value array");
+                goto err;
+        }
+
+        for (argc = 0; argv[argc] != NULL; argc++) {
+                arg_types[argc] = &ffi_type_pointer;
+                arg_values[argc] = argv[argc];
+        }
+
+        ffi_status = ffi_prep_cif(&cif, FFI_DEFAULT_ABI, argc, &ffi_type_sint,
+                                  arg_types);
+        if (ffi_status != FFI_OK) {
+                warn("ffi_prep_cif() failed");
+                goto err;
+        }
+
+        fn = get_symbol_object(ctx, "main");
+        ffi_call(&cif, (ffi_fn)fn, &result, arg_values);
+
+        rc = (int)result;
+
+#elif 1
+        struct kvm_sregs sregs;
+        struct kvm_regs regs;
+
+        rc = vcpu_ioctl(ctx, KVM_GET_SREGS, &sregs);
+        if (rc < 0) {
+                warn("Could not get vcpu sregs");
+                goto err;
+        }
+
+        rc = vcpu_ioctl(ctx, KVM_GET_REGS, &regs);
+        if (rc < 0) {
+                warn("Could not get vcpu regs");
+                goto err;
+        }
+
+        regs.rip = get_symbol_guest_object(ctx, "main");
+        if (regs.rip == 0) {
+                warn("Could not find main");
+                goto err;
+        }
+
+        rc = vcpu_ioctl(ctx, KVM_SET_REGS, &regs);
+        if (rc < 0) {
+                warn("Could not set vcpu regs");
+                goto err;
+        }
+        printf("%d doing KVM_RUN\n", __LINE__);
+        rc = vcpu_ioctl(ctx, KVM_RUN, 0);
+        printf("KVM_RUN: %d: %m\n", rc);
+        return rc;
+#else
+        printf("not written yet...\n");
+#endif
+
 err:
-        free_maps(&ctx);
+        destroy_vm(ctx);
+
         return rc;
 }
 

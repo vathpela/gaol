@@ -5,26 +5,6 @@
 #ifndef UTIL_H_
 #define UTIL_H_ 1
 
-#include <alloca.h>
-#include <dirent.h>
-#include <endian.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <limits.h>
-#include <sched.h>
-#include <stdarg.h>
-#include <stdbool.h>
-#include <stdlib.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <string.h>
-#include <sys/ioctl.h>
-#include <sys/mount.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <tgmath.h>
-#include <unistd.h>
-
 static inline int unused
 read_file(int fd, uint8_t **buf, size_t *bufsize)
 {
@@ -101,6 +81,25 @@ read_file(int fd, uint8_t **buf, size_t *bufsize)
         *bufsize = filesize+1;
         return 0;
 }
+
+static inline int unused
+sev_ioctl(struct context *ctx, int cmd, void *data, int *error)
+{
+        struct sev_issue_cmd arg;
+        int rc;
+
+        arg.cmd = cmd;
+        arg.data = (unsigned long)data;
+
+        rc = ioctl(ctx->sev, SEV_ISSUE_CMD, &arg);
+        if (error)
+                *error = arg.error;
+        return rc;
+}
+
+#define kvm_ioctl(ctx, num, ...) ioctl(ctx->kvm, num, __VA_ARGS__)
+#define vm_ioctl(ctx, num, ...) ioctl(ctx->vm, num, __VA_ARGS__)
+#define vcpu_ioctl(ctx, num, ...) ioctl(ctx->vcpu, num, __VA_ARGS__)
 
 #endif /* UTIL_H_ */
 // vim:fenc=utf-8:tw=75:et
