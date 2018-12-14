@@ -295,14 +295,17 @@ make_guest_maps(struct context *ctx)
                         if (host_map->start != start) {
                                 //printf("no\n");
                                 map = map->l_next;
+                                free(new_name);
                                 continue;
                         }
                         if (strcmp(host_map->name, map->l_name) &&
                             strcmp(host_map->name, new_name)) {
                                 //printf("no\n");
                                 map = map->l_next;
+                                free(new_name);
                                 continue;
                         }
+                        free(new_name);
 
                         offset = host_map->pgoff;
 
@@ -436,6 +439,7 @@ add_symbol(struct context *ctx, const char * const name)
         sym = calloc(1, sizeof(*sym));
         if (!sym)
                 goto err;
+        list_add(&sym->list, &ctx->symbols);
 
         sym->name = strdup(name);
         if (!sym->name)
@@ -448,8 +452,6 @@ add_symbol(struct context *ctx, const char * const name)
 
         sym->addr = (uintptr_t)object;
         //printf("Adding symbol '%s' at %p\n", name, (void *)object);
-
-        list_add(&sym->list, &ctx->symbols);
 
         ret = 0;
 err:
@@ -571,6 +573,8 @@ destroy_vm(struct context *ctx)
         if (!ctx)
                 return;
 
+        list_del(&ctx->list);
+
         if (ctx->vcpu >= 0) {
                 ctx->run->immediate_exit = 1;
 #if 0
@@ -582,8 +586,7 @@ destroy_vm(struct context *ctx)
                 close(ctx->vcpu);
         }
 
-        if (!list_empty(&ctx->symbols))
-                free_symbols(ctx);
+        free_symbols(ctx);
 
         free_maps(ctx, &ctx->host_maps);
         free_maps(ctx, &ctx->guest_maps);
@@ -607,6 +610,11 @@ destroy_vm(struct context *ctx)
         }
 
         ctx->vcpu_mmap_size = -1;
+
+        if (ctx->phandle)
+                dlclose(ctx->phandle);
+
+        free(ctx);
 }
 
 static int
@@ -955,7 +963,6 @@ forkvm(const char *filename, char * const argv[] unused)
         printf("%d doing KVM_RUN\n", __LINE__);
         rc = vcpu_ioctl(ctx, KVM_RUN, 0);
         printf("KVM_RUN: %d: %m\n", rc);
-        return rc;
 #else
         printf("not written yet...\n");
 #endif
