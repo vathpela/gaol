@@ -73,5 +73,57 @@ struct context {
         list_t list;
 };
 
+static inline uintptr_t unused
+lowest_guest_addr(struct context *ctx)
+{
+        struct list_head *pos;
+        uintptr_t addr = UINTPTR_MAX;
+
+        list_for_each(pos, &ctx->guest_maps) {
+                struct proc_map *map = list_entry(pos, struct proc_map, list);
+
+                if (map->start < addr)
+                        addr = map->start;
+        }
+        errno = 0;
+        if (addr == UINTPTR_MAX)
+                errno = ENOENT;
+        return addr;
+}
+
+static inline uintptr_t unused
+highest_guest_addr(struct context *ctx)
+{
+        struct list_head *pos;
+        uintptr_t addr = 0;
+
+        list_for_each(pos, &ctx->guest_maps) {
+                struct proc_map *map = list_entry(pos, struct proc_map, list);
+
+                if (map->end > addr)
+                        addr = map->end;
+        }
+        errno = 0;
+        if (addr == 0)
+                errno = ENOENT;
+        return addr;
+}
+
+static inline uint32_t unused
+next_slot(struct context *ctx)
+{
+        struct list_head *this;
+        struct proc_map *map;
+        uint32_t slot = UINT32_MAX;
+
+        list_for_each(this, &ctx->guest_maps) {
+                map = list_entry(this, struct proc_map, list);
+
+                if (slot == UINT32_MAX || slot <= map->kumr.slot)
+                        slot = map->kumr.slot + 1;
+        }
+        return slot;
+}
+
 #endif /* !CONTEXT_H_ */
 // vim:fenc=utf-8:tw=75:et
