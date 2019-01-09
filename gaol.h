@@ -35,7 +35,6 @@
 #endif
 
 #include "compiler.h"
-#include "page.h"
 #include "list.h"
 
 #include "context.h"
@@ -43,6 +42,7 @@
 #include "ioring.h"
 #include "dump.h"
 #include "execvm.h"
+#include "mmu.h"
 
 #endif /* !GAOL_H_ */
 // vim:fenc=utf-8:tw=75:et

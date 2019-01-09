@@ -1,10 +1,20 @@
 /*
  * context.h
- * Copyright 2018 Peter Jones <pjones@redhat.com>
+ * Copyright 2018-2019 Peter Jones <pjones@redhat.com>
  */
 
 #ifndef CONTEXT_H_
 #define CONTEXT_H_
+
+#include <errno.h>
+#include <stdio.h>
+#include <string.h>
+
+/* Memory modes */
+#define M_R_OK 1
+#define M_W_OK 2
+#define M_X_OK 4
+#define M_P_OK 8
 
 struct proc_map {
         uintptr_t start;

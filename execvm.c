@@ -1,6 +1,6 @@
 /*
  * execvm.c
- * Copyright 2018 Peter Jones <pjones@redhat.com>
+ * Copyright 2018-2019 Peter Jones <pjones@redhat.com>
  *
  */
 
@@ -18,11 +18,18 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/time.h>
+#include <time.h>
 
 #include "gaol.h"
 #include "ioring.h"
 
 #include "dump.h"
+
+#define PS_LIMIT (0x200000)
+#define KERNEL_STACK_SIZE (0x4000)
+#define MAX_KERNEL_SIZE (PS_LIMIT - 0x5000 - KERNEL_STACK_SIZE)
+#define MEM_SIZE (PS_LIMIT * 0x2)
 
 #define SKIP_SEV
 static LIST_HEAD(contexts);
@@ -73,11 +80,6 @@ get_ctx(pid_t pid)
         errno = ESRCH;
         return NULL;
 }
-
-#define M_R_OK 1
-#define M_W_OK 2
-#define M_X_OK 4
-#define M_P_OK 8
 
 static void
 free_maps(struct context *ctx, struct list_head *head)
