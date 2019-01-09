@@ -957,6 +957,12 @@ forkvm(const char *filename, char * const argv[] unused)
                 goto err;
         }
 
+        rc = init_segments(ctx);
+        if (rc < 0) {
+                warnx("init_segments() failed");
+                goto err;
+        }
+
         rc = init_sev(ctx);
         if (rc < 0) {
                 warnx("Could not initialize SEV");
