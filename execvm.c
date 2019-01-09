@@ -1060,9 +1060,40 @@ forkvm(const char *filename, char * const argv[] unused)
                 goto err;
         }
 
-        printf("%d doing KVM_RUN\n", __LINE__);
-        rc = vcpu_ioctl(ctx, KVM_RUN, 0);
-        printf("KVM_RUN: %d: %m\n", rc);
+        while (true) {
+                struct timeval tv0 = { 0, 0 }, tv1 = { 0, 0 };
+                struct timespec req = { 0, 0 }, rem = { 0, 1 };
+                int64_t timediff;
+
+                gettimeofday(&tv0, NULL);
+                rc = vcpu_ioctl(ctx, KVM_RUN, 0);
+                gettimeofday(&tv1, NULL);
+                printf("KVM_RUN took %ld.%06ld seconds\n",
+                       tv1.tv_sec - tv0.tv_sec,
+                       (tv1.tv_usec - tv0.tv_usec));
+                if (rc < 0) {
+                        warn("KVM_RUN failed");
+                        break;
+                }
+
+                timediff = (tv1.tv_sec - tv0.tv_sec) * 1000000 +
+                           tv1.tv_usec - tv0.tv_usec;
+                if (timediff > 1000000)
+                        continue;
+                if (timediff < 0)
+                        timediff = 0;
+
+                rem.tv_nsec = (1000000 - timediff) * 1000;
+                rem.tv_sec = 0;
+                rc = 0;
+                do {
+                        memmove(&req, &rem, sizeof(req));
+                        rem.tv_sec = rem.tv_nsec = 0;
+                        rc = nanosleep(&req, &rem);
+                        if (rc < 0 && errno == EINTR)
+                                rc = 0;
+                } while (rc >= 0 && rem.tv_sec >= 0 && rem.tv_nsec > 0);
+        }
 #else
         printf("not written yet...\n");
 #endif
