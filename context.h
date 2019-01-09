@@ -63,6 +63,8 @@ struct context {
         char **argv;
         void *phandle;
 
+        struct proc_map *stack_map;
+
         list_t symbols;
         list_t host_maps;
         list_t guest_maps;

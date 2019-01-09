@@ -804,6 +804,80 @@ err:
         return NULL;
 }
 
+/*
+ * We know none of the addresses *outside* of the link map we've
+ * mirrored are in use in the vm, and ASLR has already happened for
+ * our host binary, so find our stack, allocate the same amount, and
+ * assign it to the guest at the same address.
+ */
+static int
+init_stack(struct context *ctx)
+{
+        struct list_head *this;
+        struct proc_map *guest_map, *host_map = NULL;
+        uintptr_t addr;
+        void *stack;
+        size_t size;
+
+        addr = (uintptr_t)&addr;
+
+        guest_map = calloc(1, sizeof(*guest_map));
+        if (!guest_map) {
+                warn("Could not allocate guest stack map entry");
+                return -1;
+        }
+
+        list_for_each(this, &ctx->host_maps) {
+                host_map = list_entry(this, struct proc_map, list);
+                if (host_map->start <= addr && host_map->end >= addr)
+                        break;
+                host_map = NULL;
+        }
+
+        if (host_map == NULL) {
+                warnx("Could not find host stack map?!?!");
+                free(guest_map);
+                return -1;
+        }
+
+        size = ALIGN_UP(host_map->end - host_map->start, PAGE_SIZE);
+        stack = calloc(1, size);
+        if (!stack) {
+                warn("Could not allocate guest stack");
+                return -1;
+        }
+
+        memmove(guest_map, host_map, sizeof(*guest_map));
+        INIT_LIST_HEAD(&guest_map->list);
+        guest_map->end = guest_map->start + size;
+
+        guest_map->name = strdup(guest_map->name);
+        if (!guest_map->name) {
+                free(guest_map);
+                free(stack);
+                return -1;
+        }
+
+        guest_map->kumr.slot = next_slot(ctx);
+        guest_map->kumr.flags = 0;
+        guest_map->kumr.guest_phys_addr = ctx->vm_phys_base + guest_map->start;
+        guest_map->kumr.memory_size = size;
+        guest_map->kumr.userspace_addr = (uintptr_t)stack;
+
+        printf("  -> [stack] as phys:%p-%p virt:%p-%p\n",
+               (void *)guest_map->kumr.guest_phys_addr,
+               (void *)guest_map->kumr.guest_phys_addr
+                     + guest_map->kumr.memory_size,
+               (void *)guest_map->kumr.userspace_addr,
+               (void *)guest_map->kumr.userspace_addr
+                     + guest_map->kumr.memory_size);
+        fflush(stdout);
+
+        list_add(&guest_map->list, &ctx->guest_maps);
+        ctx->stack_map = guest_map;
+        return 0;
+}
+
 typedef int (*entry)(const char *filename, char * const argv[]);
 typedef void (*ffi_fn)(void);
 
@@ -877,6 +951,12 @@ forkvm(const char *filename, char * const argv[] unused)
                 goto err;
         }
 
+        rc = init_stack(ctx);
+        if (rc < 0) {
+                warnx("init_stack() failed");
+                goto err;
+        }
+
         rc = init_sev(ctx);
         if (rc < 0) {
                 warnx("Could not initialize SEV");
@@ -939,12 +1019,6 @@ forkvm(const char *filename, char * const argv[] unused)
         struct kvm_sregs sregs;
         struct kvm_regs regs;
 
-        rc = vcpu_ioctl(ctx, KVM_GET_SREGS, &sregs);
-        if (rc < 0) {
-                warn("Could not get vcpu sregs");
-                goto err;
-        }
-
         rc = vcpu_ioctl(ctx, KVM_GET_REGS, &regs);
         if (rc < 0) {
                 warn("Could not get vcpu regs");
@@ -957,11 +1031,29 @@ forkvm(const char *filename, char * const argv[] unused)
                 goto err;
         }
 
+        regs.rsp = ctx->stack_map->kumr.guest_phys_addr;
+        regs.rflags = 0x2;
+
         rc = vcpu_ioctl(ctx, KVM_SET_REGS, &regs);
         if (rc < 0) {
                 warn("Could not set vcpu regs");
                 goto err;
         }
+
+        rc = vcpu_ioctl(ctx, KVM_GET_SREGS, &sregs);
+        if (rc < 0) {
+                warn("Could not get vcpu sregs");
+                goto err;
+        }
+
+        sregs.cs.base = sregs.cs.selector = 0;
+
+        rc = vcpu_ioctl(ctx, KVM_SET_REGS, &sregs);
+        if (rc < 0) {
+                warn("Could not set vcpu sregs");
+                goto err;
+        }
+
         printf("%d doing KVM_RUN\n", __LINE__);
         rc = vcpu_ioctl(ctx, KVM_RUN, 0);
         printf("KVM_RUN: %d: %m\n", rc);
