@@ -17,7 +17,7 @@ CPPFLAGS	?= -std=gnu11 -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 \
 		   -Wall -Werror -Wextra \
 		   -Wno-error=cpp -Wno-error=suggest-attribute=format \
 		   -Wno-suggest-attribute=format -Wno-missing-format-attribute \
-		   -Wno-missing-field-initializers \
+		   -Wno-missing-field-initializers -Wno-error=unused-function \
 		   $(call pkg-config-cflags)
 CCLDFLAGS	= $(CFLAGS) -fno-merge-constants \
 		  -Wl,--fatal-warnings,--no-allow-shlib-undefined \

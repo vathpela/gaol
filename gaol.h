@@ -36,13 +36,13 @@
 
 #include "compiler.h"
 #include "list.h"
+#include "mmu.h"
 
 #include "context.h"
 #include "util.h"
 #include "ioring.h"
 #include "dump.h"
 #include "execvm.h"
-#include "mmu.h"
 
 #endif /* !GAOL_H_ */
 // vim:fenc=utf-8:tw=75:et

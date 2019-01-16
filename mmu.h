@@ -50,67 +50,18 @@
 #define EFER_FFXSR (1 << 14)
 #define EFER_TCE (1 << 15)
 
-/* 64-bit page * entry bits */
-#define PDE64_PRESENT 1
-#define PDE64_RW (1 << 1)
-#define PDE64_USER (1 << 2)
-#define PDE64_ACCESSED (1 << 5)
-#define PDE64_DIRTY (1 << 6)
-#define PDE64_PS (1 << 7)
-#define PDE64_G (1 << 8)
-
-#define ALIGN_PADDING(addr, align) (((align) - ((addr) % (align))) % (align))
-#define ALIGN_DOWN(addr, align) ((addr) - ((align) - ALIGN_PADDING(addr, align)))
-#define ALIGN_UP(addr, align) ((addr) + ALIGN_PADDING(addr, align))
-
-#ifndef PAGE_SIZE
-#define PAGE_SIZE 4096
-#ifndef PAGE_SHIFT
-#define PAGE_SHIFT 12
-#endif
-#endif
-
-#define PFN_MAX 0x0000fffffffff000
-
-#define BYTES_TO_PAGES(bytes) ((bytes) >> PAGE_SHIFT)
-#define PAGES_TO_BYTES(pages) ((pages) << PAGE_SHIFT)
-
-#define PAGE_ALIGN_UP(bytes) ALIGN_UP(bytes, PAGE_SIZE)
-#define PAGE_ALIGN_DOWN(bytes) ALIGN_DOWN(bytes, PAGE_SIZE)
-
-#define N_PAGES(bytes) BYTES_TO_PAGES(PAGE_ALIGN_UP(bytes))
-#define STARTING_PAGE(addr) BYTES_TO_PAGES(PAGE_ALIGN_DOWN(bytes))
-
 typedef struct {
-        uint64_t reserved:12;
-        uint64_t pml4_base:40;
-        uint64_t ignored0:7;
-        uint64_t pcd:1;
-        uint64_t pwt:1;
-        uint64_t ignored1:3;
+                uint64_t reserved:12;
+                int64_t pml4_base:40;
+                uint64_t ignored0:7;
+                uint64_t pcd:1;
+                uint64_t pwt:1;
+                uint64_t ignored1:3;
 } cr3_t;
-
-static inline void
-set_cr3_addr(cr3_t *cr3, uintptr_t ptr)
-{
-        cr3->pml4_base = ptr & 0x000fffffffffffffull;
-}
-
-static inline uintptr_t
-get_cr3_addr(cr3_t *cr3)
-{
-        uintptr_t ret = cr3->pml4_base;
-
-        if (ret & 0x0008000000000000ull)
-                ret |= 0xfff0000000000000ull;
-
-        return ret;
-}
 
 typedef struct {
         uint64_t nx:1;
-        uint64_t ignored0:11;
-        uint64_t pdp_base:40;
+        int64_t pdp_base:51;
         uint64_t avl:3;
         uint64_t reserved1:2;
         uint64_t ignored2:1;
@@ -124,12 +75,11 @@ typedef struct {
 
 typedef struct {
         uint64_t nx:1;
-        uint64_t ignored0:11;
-        uint64_t pd_base:40;
+        int64_t pd_base:51;
         uint64_t avl:3;
         uint64_t ignored1:1;
         uint64_t zero:1;
-        uint64_t ignored2:1;
+        uint64_t ps:1;
         uint64_t a:1;
         uint64_t pcd:1;
         uint64_t pwt:1;
@@ -140,12 +90,11 @@ typedef struct {
 
 typedef struct {
         uint64_t nx:1;
-        uint64_t ignored0:11;
-        uint64_t pt_base:40;
+        uint64_t pt_base:51;
         uint64_t avl:3;
         uint64_t ignored1:1;
         uint64_t zero:1;
-        uint64_t ignored2:1;
+        uint64_t ps:1;
         uint64_t a:1;
         uint64_t pcd:1;
         uint64_t pwt:1;
@@ -156,8 +105,7 @@ typedef struct {
 
 typedef struct {
         uint64_t nx:1;
-        uint64_t ignored0:11;
-        uint64_t page_base:40;
+        int64_t page_base:51;
         uint64_t avl:3;
         uint64_t g:1;
         uint64_t pat:1;
@@ -170,52 +118,198 @@ typedef struct {
         uint64_t p:1;
 } pte_t;
 
-#define pml4e_shift 39ull
-#define pml4e_mask 0x1ffull
-#define pdpe_shift 30ull
-#define pdpe_mask 0x1ffull
-#define pde_shift 21ull
-#define pde_mask 0x1ffull
-#define pte_shift 12ull
-#define pte_mask 0x1ffull
-#define offset_mask 0xfffull
+typedef union {
+        uint64_t data[512];
+        pml4e_t pml4[512];
+        pdpe_t pdp[512];
+        pde_t pd[512];
+        pte_t pt[512];
+} page_table_t;
+
+typedef struct {
+        page_table_t table;
+        list_t list;
+} page_table_list_t;
+
+#define ALIGN_PADDING(addr, align) (((align) - ((addr) % (align))) % (align))
+#define ALIGN_DOWN(addr, align) ((addr) - ((align) - ALIGN_PADDING(addr, align)))
+#define ALIGN_UP(addr, align) ((addr) + ALIGN_PADDING(addr, align))
+
+#define signex(val, bits) ({ \
+        __typeof__(val) test_ = 1ul << ((bits) - 1);                    \
+        __typeof__(val) mask_ = ~((test_ << 1) - 1);                    \
+        __typeof__(val) ret_ = (((val) & test_)                         \
+                        ? ((val) | mask_)                               \
+                        : (val));                                       \
+        ret_;                                                           \
+        })
+
+#ifndef PAGE_SIZE
+#define PAGE_SIZE 4096
+#ifndef PAGE_SHIFT
+#define PAGE_SHIFT 12
+#endif
+#endif
+
+#define PT_SHIFT PAGE_SHIFT
+#define PT_SIZE PAGE_SIZE
+
+#define PD_SHIFT 21
+#define PD_SIZE  (1 << PD_SHIFT)
+
+#define PDP_SHIFT 30
+#define PDP_SIZE (1 << PDP_SHIFT)
+
+#define BYTES_TO_PAGES(bytes) ((bytes) >> PAGE_SHIFT)
+#define PAGES_TO_BYTES(pages) ((pages) << PAGE_SHIFT)
+
+#define PAGE_ALIGN_UP(bytes) ALIGN_UP(bytes, PAGE_SIZE)
+#define PAGE_ALIGN_DOWN(bytes) ALIGN_DOWN(bytes, PAGE_SIZE)
+
+#define N_PAGES(bytes) BYTES_TO_PAGES(PAGE_ALIGN_UP(bytes))
+#define STARTING_PAGE(addr) BYTES_TO_PAGES(PAGE_ALIGN_DOWN(bytes))
+
+#define PFN30_MASK 0x000000003ffffffful
+#define ptr64_to_pfn30(ptr) \
+        ((((uintptr_t)ptr) >> PAGE_SHIFT) & PFN30_MASK)
+
+#define PFN40_MASK 0x000000fffffffffful
+#define ptr64_to_pfn40(ptr) \
+        ((((uintptr_t)ptr) >> PAGE_SHIFT) & PFN40_MASK)
+
+#define pgoff12(ptr) \
+        (((intptr_t)ptr) & 0xffful)
+#define pgoff21(ptr) \
+        (((intptr_t)ptr) & 0xffffful)
+#define pgoff30(ptr) \
+        (((intptr_t)ptr) & 0x3ffffffful)
+
+#define pfn51_to_ptr64(ptr) ((void *)signex((((intptr_t)(ptr)) << PAGE_SHIFT), 51))
+#define pfn40_to_ptr64(ptr) ((void *)signex((((intptr_t)(ptr)) << PAGE_SHIFT), 40))
+#define pfn30_to_ptr64(ptr) ((void *)signex((((intptr_t)(ptr)) << PAGE_SHIFT), 30))
+
+#define pml4e_shift 39ul
+#define pml4e_mask 0x1fful
+#define pdpe_shift 30ul
+#define pdpe_mask 0x1fful
+#define pdpe_offset_mask ((1ul << pdpe_shift) - 1)
+#define pde_shift 21ul
+#define pde_mask 0x1fful
+#define pde_offset_mask ((1ul << pde_shift) - 1)
+#define pte_shift 12ul
+#define pte_mask 0x1fful
+#define pte_offset_mask ((1ul << pte_shift) - 1)
 
 #define get_pml4e(addr) (((addr) >> pml4e_shift) & pml4e_mask)
 #define get_pdpe(addr) (((addr) >> pdpe_shift) & pdpe_mask)
 #define get_pde(addr) (((addr) >> pde_shift) & pde_mask)
 #define get_pte(addr) (((addr) >> pte_shift) & pte_mask)
-#define get_offset(addr) ((addr) & offset_mask)
+#define get_pte_offset(addr) ((addr) & pte_offset_mask)
+#define get_pde_offset(addr) ((addr) & pde_offset_mask)
+#define get_pdpe_offset(addr) ((addr) & pdpe_offset_mask)
 
 #define clear_bits(val, shift, mask) \
-        (((unsigned long long)(val)) & ~((mask) << (shift)))
-#define shift_and_mask(val, shift, mask) \
-        ((((unsigned long long)(val)) >> (shift)) & (mask))
+        (((unsigned long)(val)) & ~((mask) << (shift)))
+#define rshift_and_mask(val, shift, mask) \
+        ((((unsigned long)(val)) >> (shift)) & (mask))
+#define mask_and_lshift(val, shift, mask) \
+        ((((unsigned long)(val)) & (mask)) << (shift))
 #define set_bits(val, bits, shift, mask) \
-        ((val) | shift_and_mask(bits, shift, mask))
+        ((val) | mask_and_lshift(bits, shift, mask))
 #define apply_bits(val, bits, shift, mask) \
         ((val) = (set_bits(clear_bits(val, shift, mask), bits, shift, mask)))
 
-#define set_pml4e(addr, pml4e) apply_bits(addr, pml4e, pml4e_shift, pml4e_mask)
-#define set_pdpe(addr, pdpe) apply_bits(addr, pdpe, pdpe_shift, pdpe_mask)
-#define set_pde(addr, pde) apply_bits(addr, pde, pde_shift, pde_mask)
-#define set_pte(addr, pte) apply_bits(addr, pte, pte_shift, pte_mask)
-#define set_offset(addr, offset) apply_bits(addr, offset, 0, offset_mask)
+#define set_pml4e(addr, pml4e) set_bits(addr, pml4e, pml4e_shift, pml4e_mask)
+#define set_pdpe(addr, pdpe) set_bits(addr, pdpe, pdpe_shift, pdpe_mask)
+#define set_pde(addr, pde) set_bits(addr, pde, pde_shift, pde_mask)
+#define set_pte(addr, pte) set_bits(addr, pte, pte_shift, pte_mask)
+#define set_pte_offset(addr, offset) \
+        set_bits(addr, offset, 0, pte_offset_mask)
+#define set_pde_offset(addr, offset) \
+        set_bits(addr, offset, 0, pde_offset_mask)
+#define set_pdpe_offset(addr, offset) \
+        set_bits(addr, offset, 0, pdpe_offset_mask)
 
-#define paging_to_addr(pml4e, pdpe, pde, pte, offset)   \
+#define pdpe_to_addr(pml4e, pdpe, offset)               \
         ({                                              \
-                uint64_t addr_ = 0;                     \
-                set_pml4e(addr_, pml4e);                \
-                set_pdpe(addr_, pdpe);                  \
-                set_pde(addr_, pde);                    \
-                set_pte(addr_, pte);                    \
-                set_offset(addr_, offset);              \
+                intptr_t addr_ = 0;                     \
+                printf("\npdpe_to_addr(0x%03hx, 0x%03hx, 0x%016lx)\n", \
+                       pml4e, pdpe, offset);                            \
+                printf("  set_pml4e(0x%016lx, 0x%016x) -> 0x%016lx\n", \
+                       addr_, pml4e, set_pml4e(addr_, pml4e));           \
+                addr_ = set_pml4e(addr_, pml4e);                        \
+                printf("  set_pdpe(0x%016lx, 0x%016x) -> 0x%016lx\n",  \
+                       addr_, pdpe, set_pdpe(addr_, pdpe));             \
+                addr_ = set_pdpe(addr_, pdpe);                          \
+                printf("  set_pdpe_offset(0x%016lx, 0x%016lx) -> 0x%016lx\n",\
+                       addr_, offset, set_pdpe_offset(addr_, offset));  \
+                addr_ = set_pdpe_offset(addr_, offset);                 \
+                addr_;                                                  \
+        })
+
+#define pde_to_addr(pml4e, pdpe, pde, offset)           \
+        ({                                              \
+                intptr_t addr_ = 0;                     \
+                addr_ = set_pml4e(addr_, pml4e);        \
+                addr_ = set_pdpe(addr_, pdpe);          \
+                addr_ = set_pde(addr_, pde);            \
+                addr_ = set_pde_offset(addr_, offset);  \
+                addr_;                                  \
+        })
+
+#define pte_to_addr(pml4e, pdpe, pde, pte, offset)      \
+        ({                                              \
+                intptr_t addr_ = 0;                     \
+                addr_ = set_pml4e(addr_, pml4e);        \
+                addr_ = set_pdpe(addr_, pdpe);          \
+                addr_ = set_pde(addr_, pde);            \
+                addr_ = set_pte(addr_, pte);            \
+                addr_ = set_pte_offset(addr_, offset);  \
                 addr_;                                  \
         })
 
 #define get_pfn(addr) ((addr) >> PAGE_SHIFT)
 
-extern int private init_paging(struct context *ctx);
-extern int private init_segments(struct context *ctx);
+#define virt_to_phys(pml4_base, vaddr)                                  \
+        ({                                                              \
+                uint16_t pml4en_ = get_pml4e(vaddr);                    \
+                uint16_t pdpen_ = get_pdpe(vaddr);                      \
+                pml4e_t *pml4e = ((pml4e_t *)pml4_base) + pml4en_;      \
+                struct list_head *n_, *pos_;                            \
+                pdpe_t *pdpe = (
+
+typedef enum {
+        CR3,
+        PML4E,
+        PDPE,
+        PDE,
+        PTE
+} pt_type;
+
+typedef union {
+        struct {
+                uint16_t si:13;
+                uint16_t ti:1;
+                uint16_t rpl:2;
+        };
+        uint16_t value;
+} segment_selector;
+
+#define selector(SI, TI, RPL) \
+        ((uint16_t)(segment_selector){ .si = SI, .ti = TI, .rpl = RPL }.value)
+
+typedef enum {
+        RING0 = 0,
+        KERNEL = 0,
+        RING1,
+        RING2,
+        USER = 3,
+        RING3 = 3,
+} ring;
+
+typedef enum {
+        ES, CS=0xb, SS=0x2, DS, FS, GS
+} segreg;
 
 #endif /* !CPU_H_ */
 // vim:fenc=utf-8:tw=75:et

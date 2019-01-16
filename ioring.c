@@ -25,6 +25,7 @@ ioring_map_rings(void)
 
         iorings__ = mmap(NULL, sizeof(*iorings__), PROT_READ|PROT_WRITE,
                          MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+        printf("iorings__: %p\n", iorings__);
         if (iorings__ == MAP_FAILED) {
                 warn("mmap(NULL, %zd, PROT_READ|PROT_WRITE, MAP_SHARED_VALIDATE|MAP_ANONYMOUS, -1, 0) = MAP_FAILED",
                      sizeof (*iorings__));

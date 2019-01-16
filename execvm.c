@@ -9,7 +9,6 @@
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <ffi.h>
 #include <gelf.h>
 #include <inttypes.h>
 #include <link.h>
@@ -18,8 +17,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/param.h>
 #include <sys/time.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "gaol.h"
 #include "ioring.h"
@@ -48,8 +49,8 @@ new_vm_ctx(void)
         ctx->sev = -1;
 
         ctx->vm = -1;
-        ctx->vm_identity_map = (uintptr_t)MAP_FAILED;
-        ctx->vm_tss = (uintptr_t)MAP_FAILED;
+        ctx->vm_identity.userspace_addr = (uintptr_t)MAP_FAILED;
+        ctx->vm_tss.userspace_addr = (uintptr_t)MAP_FAILED;
 
         ctx->vcpu = -1;
         ctx->vcpu_mmap_size = -1;
@@ -59,6 +60,7 @@ new_vm_ctx(void)
         INIT_LIST_HEAD(&ctx->host_maps);
         INIT_LIST_HEAD(&ctx->guest_maps);
         INIT_LIST_HEAD(&ctx->symbols);
+        INIT_LIST_HEAD(&ctx->page_tables);
 
         list_add(&ctx->list, &contexts);
 
@@ -513,6 +515,8 @@ get_symbol_guest_object(struct context *ctx, const char * const name)
 
                 if (map->start > object || object > map->end)
                         continue;
+                if (!map->user_pages)
+                        continue;
 
                 /*
                  * right now we're keeping the guest aliased to the host
@@ -590,8 +594,19 @@ destroy_vm(struct context *ctx)
 
         free_symbols(ctx);
 
+        free((void *)ctx->stack_map->start);
+
         free_maps(ctx, &ctx->host_maps);
         free_maps(ctx, &ctx->guest_maps);
+
+        struct list_head *n, *this;
+        list_for_each_safe(this, n, &ctx->page_tables) {
+                page_table_list_t *pti =
+                        list_entry(this, page_table_list_t, list);
+
+                list_del(&pti->list);
+                free(pti);
+        }
 
         if (ctx->vm >= 0)
                 close(ctx->vm);
@@ -613,6 +628,12 @@ destroy_vm(struct context *ctx)
 
         ctx->vcpu_mmap_size = -1;
 
+        if (ctx->vm_tss.userspace_addr != (uintptr_t)MAP_FAILED)
+                munmap((void *)ctx->vm_tss.userspace_addr, PAGE_SIZE * 3);
+
+        if (ctx->vm_identity.userspace_addr != (uintptr_t)MAP_FAILED)
+                munmap((void *)ctx->vm_identity.userspace_addr, PAGE_SIZE);
+
         if (ctx->phandle)
                 dlclose(ctx->phandle);
 
@@ -624,9 +645,8 @@ pick_and_place_dsos(struct context *ctx)
 {
         int rc = -1;
         struct list_head *this;
-        uint32_t slot = 0;
 
-        printf("Adding guest maps\n");
+        printf("Adding guest maps with phys base 0x%016lx\n", ctx->vm_phys_base);
         list_for_each(this, &ctx->guest_maps) {
                 struct proc_map *map;
 
@@ -650,13 +670,14 @@ pick_and_place_dsos(struct context *ctx)
 
                 printf("\n");
 
-                map->kumr.slot = slot++;
+                map->user_pages = true;
+                map->kumr.slot = ctx->kumr_slot++;
                 map->kumr.flags = (map->mode & M_W_OK) ? 0 : KVM_MEM_READONLY;
                 map->kumr.guest_phys_addr = ctx->vm_phys_base + map->start;
                 map->kumr.memory_size = map->end - map->start;
                 map->kumr.userspace_addr = map->start;
 
-                printf("  -> as phys:%p-%p virt:%p-%p\n",
+                printf("  -> as phys:%p-%p gaol:%p-%p\n",
                        (void *)map->kumr.guest_phys_addr,
                        (void *)map->kumr.guest_phys_addr+map->kumr.memory_size,
                        (void *)map->kumr.userspace_addr,
@@ -738,26 +759,46 @@ set_up_vm(void)
         }
 
         /* PJFIX: check capabilities */
-        ctx->vm_identity_map = 0x100000000 - (PAGE_SIZE << 2);
-        printf("Setting vm_identity_map to %p\n", (void *)ctx->vm_identity_map);
-        fflush(stdout);
-        rc = vm_ioctl(ctx, KVM_SET_IDENTITY_MAP_ADDR, &ctx->vm_identity_map);
+        ctx->vm_identity.slot = ctx->kumr_slot++;
+        ctx->vm_identity.flags = 0;
+        ctx->vm_identity.guest_phys_addr = 0xfffbc000;
+        ctx->vm_identity.memory_size = PAGE_SIZE;
+        ctx->vm_identity.userspace_addr =
+                (uintptr_t)mmap(0, PAGE_SIZE, PROT_READ|PROT_WRITE,
+                                MAP_SHARED|MAP_ANONYMOUS, -1, 0);
+        printf("vm_identity.userspace_addr: 0x%016llx\n", ctx->vm_identity.userspace_addr);
+        if (!ctx->vm_identity.userspace_addr) {
+                warn("Couldn't get identity map");
+                goto err;
+        }
+
+        rc = vm_ioctl(ctx, KVM_SET_IDENTITY_MAP_ADDR, &ctx->vm_identity.userspace_addr);
         if (rc < 0) {
                 warn("Could not set vm identity map address");
                 goto err;
         }
 
         /* PJFIX: check capabilities */
-        ctx->vm_tss = ctx->vm_identity_map + PAGE_SIZE;
-        printf("Setting vm_tss to %p\n", (void *)ctx->vm_tss);
-        fflush(stdout);
-        rc = vm_ioctl(ctx, KVM_SET_TSS_ADDR, ctx->vm_tss);
+        ctx->vm_tss.slot = ctx->kumr_slot++;
+        ctx->vm_tss.flags = 0;
+        ctx->vm_tss.guest_phys_addr = 0xfffbd000;
+        ctx->vm_tss.memory_size = PAGE_SIZE * 3;
+        ctx->vm_tss.userspace_addr =
+                (uintptr_t)mmap(0, PAGE_SIZE * 3, PROT_READ|PROT_WRITE,
+                                MAP_SHARED|MAP_ANONYMOUS, -1, 0);
+        printf("vm_tss.userspace_addr: 0x%016llx\n", ctx->vm_tss.userspace_addr);
+        if (!ctx->vm_tss.userspace_addr) {
+                warn("Couldn't get identity map");
+                goto err;
+        }
+
+        rc = vm_ioctl(ctx, KVM_SET_TSS_ADDR, ctx->vm_tss.userspace_addr);
         if (rc < 0) {
                 warn("Could not set vm tss address");
                 goto err;
         }
 
-        ctx->vm_phys_base = ctx->vm_identity_map + (PAGE_SIZE << 2);
+        ctx->vm_phys_base = 0xfffc0000;
 
         ctx->vcpu = vm_ioctl(ctx, KVM_CREATE_VCPU, cpuid);
         if (ctx->vcpu < 0) {
@@ -849,6 +890,7 @@ init_stack(struct context *ctx)
 
         memmove(guest_map, host_map, sizeof(*guest_map));
         INIT_LIST_HEAD(&guest_map->list);
+        guest_map->start = (uintptr_t)stack;
         guest_map->end = guest_map->start + size;
 
         guest_map->name = strdup(guest_map->name);
@@ -858,13 +900,14 @@ init_stack(struct context *ctx)
                 return -1;
         }
 
-        guest_map->kumr.slot = next_slot(ctx);
+        guest_map->user_pages = true;
+        guest_map->kumr.slot = ctx->kumr_slot++;
         guest_map->kumr.flags = 0;
         guest_map->kumr.guest_phys_addr = ctx->vm_phys_base + guest_map->start;
         guest_map->kumr.memory_size = size;
         guest_map->kumr.userspace_addr = (uintptr_t)stack;
 
-        printf("  -> [stack] as phys:%p-%p virt:%p-%p\n",
+        printf("  -> [stack] as phys:%p-%p gaol:%p-%p\n",
                (void *)guest_map->kumr.guest_phys_addr,
                (void *)guest_map->kumr.guest_phys_addr
                      + guest_map->kumr.memory_size,
@@ -877,9 +920,6 @@ init_stack(struct context *ctx)
         ctx->stack_map = guest_map;
         return 0;
 }
-
-typedef int (*entry)(const char *filename, char * const argv[]);
-typedef void (*ffi_fn)(void);
 
 vmid_t hidden
 forkvm(const char *filename, char * const argv[] unused)
@@ -957,72 +997,26 @@ forkvm(const char *filename, char * const argv[] unused)
                 goto err;
         }
 
+        rc = init_paging(ctx);
+        if (rc < 0) {
+                warnx("init_paging() failed");
+                goto err;
+        }
+
         rc = init_segments(ctx);
         if (rc < 0) {
                 warnx("init_segments() failed");
                 goto err;
         }
 
+#if 0
         rc = init_sev(ctx);
         if (rc < 0) {
                 warnx("Could not initialize SEV");
                 goto err;
         }
+#endif
 
-#if 0
-//        for (unsigned int i = 0; argv[i]; i++)
-//                printf("%c%s", i == 0 ? '\0' : ' ', argv[i]);
-        fflush(stdout);
-        fflush(stderr);
-        fsync(STDOUT_FILENO);
-        fdatasync(STDOUT_FILENO);
-        fsync(STDERR_FILENO);
-        fdatasync(STDERR_FILENO);
-        rc = execv(filename, argv);
-        if (rc < 0)
-                warn("execv(\"%s\", [...]) failed", filename);
-#elif 0
-        ffi_cif cif;
-        ffi_status ffi_status;
-        ffi_type **arg_types;
-        ffi_sarg result;
-        void **arg_values;
-        unsigned int argc;
-        entry fn = NULL;
-
-        for (argc = 0; argv[argc] != NULL; argc++)
-                ;
-
-        arg_types = calloc(argc, sizeof(ffi_type *));
-        if (!arg_types) {
-                warn("Could not allocate argument type array");
-                goto err;
-        }
-        arg_values = calloc(argc, sizeof(void *));
-        if (!arg_values) {
-                warn("Could not allocate argument value array");
-                goto err;
-        }
-
-        for (argc = 0; argv[argc] != NULL; argc++) {
-                arg_types[argc] = &ffi_type_pointer;
-                arg_values[argc] = argv[argc];
-        }
-
-        ffi_status = ffi_prep_cif(&cif, FFI_DEFAULT_ABI, argc, &ffi_type_sint,
-                                  arg_types);
-        if (ffi_status != FFI_OK) {
-                warn("ffi_prep_cif() failed");
-                goto err;
-        }
-
-        fn = get_symbol_object(ctx, "main");
-        ffi_call(&cif, (ffi_fn)fn, &result, arg_values);
-
-        rc = (int)result;
-
-#elif 1
-        struct kvm_sregs sregs;
         struct kvm_regs regs;
 
         rc = vcpu_ioctl(ctx, KVM_GET_REGS, &regs);
@@ -1031,14 +1025,19 @@ forkvm(const char *filename, char * const argv[] unused)
                 goto err;
         }
 
-        regs.rip = get_symbol_guest_object(ctx, "main");
+        uint64_t offset = 1ul << 32;
+        regs.rip = get_symbol_guest_object(ctx, "main") + offset;
         if (regs.rip == 0) {
                 warn("Could not find main");
                 goto err;
         }
 
-        regs.rsp = ctx->stack_map->kumr.guest_phys_addr;
+        regs.rsp = ctx->stack_map->kumr.guest_phys_addr + offset;
+        regs.rax = 0;
+        regs.rbx = 0;
         regs.rflags = 0x2;
+
+        printf("setting rip=0x%016llx rsp=0x%016llx\n", regs.rip, regs.rsp);
 
         rc = vcpu_ioctl(ctx, KVM_SET_REGS, &regs);
         if (rc < 0) {
@@ -1046,21 +1045,10 @@ forkvm(const char *filename, char * const argv[] unused)
                 goto err;
         }
 
-        rc = vcpu_ioctl(ctx, KVM_GET_SREGS, &sregs);
-        if (rc < 0) {
-                warn("Could not get vcpu sregs");
-                goto err;
-        }
+        finalize_paging(ctx);
 
-        sregs.cs.base = sregs.cs.selector = 0;
-
-        rc = vcpu_ioctl(ctx, KVM_SET_REGS, &sregs);
-        if (rc < 0) {
-                warn("Could not set vcpu sregs");
-                goto err;
-        }
-
-        while (true) {
+        bool go = true;
+        while (go) {
                 struct timeval tv0 = { 0, 0 }, tv1 = { 0, 0 };
                 struct timespec req = { 0, 0 }, rem = { 0, 1 };
                 int64_t timediff;
@@ -1068,11 +1056,38 @@ forkvm(const char *filename, char * const argv[] unused)
                 gettimeofday(&tv0, NULL);
                 rc = vcpu_ioctl(ctx, KVM_RUN, 0);
                 gettimeofday(&tv1, NULL);
+                if (rc < 0) {
+                        warn("KVM_RUN failed");
+                        break;
+                }
                 printf("KVM_RUN took %ld.%06ld seconds\n",
                        tv1.tv_sec - tv0.tv_sec,
                        (tv1.tv_usec - tv0.tv_usec));
-                if (rc < 0) {
-                        warn("KVM_RUN failed");
+                switch (ctx->run->exit_reason) {
+                case KVM_EXIT_HLT:
+                        printf("exited with KVM_EXIT_HLT\n");
+                        go = false;
+                        break;
+                case KVM_EXIT_IO:
+                        printf("exited with KVM_EXIT_IO\n");
+                        go = false;
+                        break;
+                case KVM_EXIT_FAIL_ENTRY:
+                        printf("exited with KVM_EXIT_FAIL_ENTRY\n");
+                        printf("failure reason: 0x%0llx\n", ctx->run->fail_entry.hardware_entry_failure_reason);
+                        go = false;
+                        break;
+                case KVM_EXIT_INTERNAL_ERROR:
+                        printf("exited with KVM_EXIT_INTERNAL_ERROR\n");
+                        go = false;
+                        break;
+                case KVM_EXIT_SHUTDOWN:
+                        printf("exited with KVM_EXIT_SHUTDOWN\n");
+                        go = false;
+                        break;
+                default:
+                        printf("exited with %d\n", ctx->run->exit_reason);
+                        go = false;
                         break;
                 }
 
@@ -1094,9 +1109,6 @@ forkvm(const char *filename, char * const argv[] unused)
                                 rc = 0;
                 } while (rc >= 0 && rem.tv_sec >= 0 && rem.tv_nsec > 0);
         }
-#else
-        printf("not written yet...\n");
-#endif
 
 err:
         destroy_vm(ctx);
