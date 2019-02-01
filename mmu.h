@@ -6,116 +6,152 @@
 #ifndef CPU_H_
 #define CPU_H_
 
-/* CR0 bits */
-#define CR0_PE 1u
-#define CR0_MP (1u << 1)
-#define CR0_EM (1u << 2)
-#define CR0_TS (1u << 3)
-#define CR0_ET (1u << 4)
-#define CR0_NE (1u << 5)
-#define CR0_WP (1u << 16)
-#define CR0_AM (1u << 18)
-#define CR0_NW (1u << 29)
-#define CR0_CD (1u << 30)
-#define CR0_PG (1u << 31)
+typedef union {
+        struct {
+                uint64_t reserved0:32;
+                uint64_t pg:1;
+                uint64_t cd:1;
+                uint64_t nw:1;
+                uint64_t reserved1:10;
+                uint64_t am:1;
+                uint64_t reserved2:1;
+                uint64_t wp:1;
+                uint64_t reserved3:10;
+                uint64_t ne:1;
+                uint64_t et:1;
+                uint64_t ts:1;
+                uint64_t em:1;
+                uint64_t mp:1;
+                uint64_t pe:1;
+        };
+        uint64_t cr0;
+} cr0_t;
 
-/* CR4 bits */
-#define CR4_VME 1u
-#define CR4_PVI (1u << 1)
-#define CR4_TSD (1u << 2)
-#define CR4_DE (1u << 3)
-#define CR4_PSE (1u << 4)
-#define CR4_PAE (1u << 5)
-#define CR4_MCE (1u << 6)
-#define CR4_PGE (1u << 7)
-#define CR4_PCE (1u << 8)
-#define CR4_OSFXSR (1u << 9)
-#define CR4_OSXMMEXCPT (1u << 10)
-#define CR4_UMIP (1u << 11)
-#define CR4_VMXE (1u << 13)
-#define CR4_SMXE (1u << 14)
-#define CR4_FSGSBASE (1u << 16)
-#define CR4_PCIDE (1u << 17)
-#define CR4_OSXSAVE (1u << 18)
-#define CR4_SMEP (1u << 20)
-#define CR4_SMAP (1u << 21)
-#define CR4_PKE (1u << 22)
-
-#define EFER_SCE 1
-#define EFER_LME (1 << 8)
-#define EFER_LMA (1 << 10)
-#define EFER_NXE (1 << 11)
-#define EFER_SVME (1 << 12)
-#define EFER_LMSLE (1 << 13)
-#define EFER_FFXSR (1 << 14)
-#define EFER_TCE (1 << 15)
-
-typedef struct {
+typedef union {
+        struct {
                 uint64_t reserved:12;
                 int64_t pml4_base:40;
                 uint64_t ignored0:7;
                 uint64_t pcd:1;
                 uint64_t pwt:1;
                 uint64_t ignored1:3;
+        };
+        uint64_t cr3;
 } cr3_t;
 
-typedef struct {
-        uint64_t nx:1;
-        int64_t pdp_base:51;
-        uint64_t avl:3;
-        uint64_t reserved1:2;
-        uint64_t ignored2:1;
-        uint64_t a:1;
-        uint64_t pcd:1;
-        uint64_t pwt:1;
-        uint64_t us:1;
-        uint64_t rw:1;
-        uint64_t p:1;
+typedef union {
+        struct {
+                uint64_t reserved0:32;
+                uint64_t reserved1:10;
+                uint64_t smap:1;
+                uint64_t smep:1;
+                uint64_t reserved2:1;
+                uint64_t osxsave:1;
+                uint64_t reserved3:1;
+                uint64_t fsgsbase:1;
+                uint64_t reserved:5;
+                uint64_t osxmmexcpt:1;
+                uint64_t osfxsr:1;
+                uint64_t pce:1;
+                uint64_t pge:1;
+                uint64_t mce:1;
+                uint64_t pae:1;
+                uint64_t pse:1;
+                uint64_t de:1;
+                uint64_t tsd:1;
+                uint64_t pvi:1;
+                uint64_t vme:1;
+        };
+        uint64_t cr4;
+} cr4_t;
+
+typedef union {
+        struct {
+                uint64_t reserved0:32;
+                uint64_t reserved1:16;
+                uint64_t tce:1;
+                uint64_t ffxsr:1;
+                uint64_t lmsle:1;
+                uint64_t svme:1;
+                uint64_t nxe:1;
+                uint64_t lma:1;
+                uint64_t reserved_mbz:1;
+                uint64_t lme:1;
+                uint64_t reserved_raz:7;
+                uint64_t sce:1;
+        };
+        uint64_t efer;
+} efer_t;
+
+typedef union {
+        struct {
+                uint64_t nx:1;
+                int64_t pdp_base:51;
+                uint64_t avl:3;
+                uint64_t reserved1:2;
+                uint64_t ignored2:1;
+                uint64_t a:1;
+                uint64_t pcd:1;
+                uint64_t pwt:1;
+                uint64_t us:1;
+                uint64_t rw:1;
+                uint64_t p:1;
+        };
+        uint64_t pml4e;
 } pml4e_t;
 
-typedef struct {
-        uint64_t nx:1;
-        int64_t pd_base:51;
-        uint64_t avl:3;
-        uint64_t ignored1:1;
-        uint64_t zero:1;
-        uint64_t ps:1;
-        uint64_t a:1;
-        uint64_t pcd:1;
-        uint64_t pwt:1;
-        uint64_t us:1;
-        uint64_t rw:1;
-        uint64_t p:1;
+typedef union {
+        struct {
+                uint64_t nx:1;
+                int64_t pd_base:51;
+                uint64_t avl:3;
+                uint64_t ignored1:1;
+                uint64_t zero:1;
+                uint64_t ps:1;
+                uint64_t a:1;
+                uint64_t pcd:1;
+                uint64_t pwt:1;
+                uint64_t us:1;
+                uint64_t rw:1;
+                uint64_t p:1;
+        };
+        uint64_t pdpe;
 } pdpe_t;
 
-typedef struct {
-        uint64_t nx:1;
-        uint64_t pt_base:51;
-        uint64_t avl:3;
-        uint64_t ignored1:1;
-        uint64_t zero:1;
-        uint64_t ps:1;
-        uint64_t a:1;
-        uint64_t pcd:1;
-        uint64_t pwt:1;
-        uint64_t us:1;
-        uint64_t rw:1;
-        uint64_t p:1;
+typedef union {
+        struct {
+                uint64_t nx:1;
+                uint64_t pt_base:51;
+                uint64_t avl:3;
+                uint64_t ignored1:1;
+                uint64_t zero:1;
+                uint64_t ps:1;
+                uint64_t a:1;
+                uint64_t pcd:1;
+                uint64_t pwt:1;
+                uint64_t us:1;
+                uint64_t rw:1;
+                uint64_t p:1;
+        };
+        uint64_t pde;
 } pde_t;
 
-typedef struct {
-        uint64_t nx:1;
-        int64_t page_base:51;
-        uint64_t avl:3;
-        uint64_t g:1;
-        uint64_t pat:1;
-        uint64_t d:1;
-        uint64_t a:1;
-        uint64_t pcd:1;
-        uint64_t pwt:1;
-        uint64_t us:1;
-        uint64_t rw:1;
-        uint64_t p:1;
+typedef union {
+        struct {
+                uint64_t nx:1;
+                int64_t page_base:51;
+                uint64_t avl:3;
+                uint64_t g:1;
+                uint64_t pat:1;
+                uint64_t d:1;
+                uint64_t a:1;
+                uint64_t pcd:1;
+                uint64_t pwt:1;
+                uint64_t us:1;
+                uint64_t rw:1;
+                uint64_t p:1;
+        };
+        uint64_t pte;
 } pte_t;
 
 typedef union {
@@ -145,20 +181,28 @@ typedef struct {
         })
 
 #ifndef PAGE_SIZE
-#define PAGE_SIZE 4096
+#define PAGE_SIZE 4096ul
 #ifndef PAGE_SHIFT
 #define PAGE_SHIFT 12
 #endif
 #endif
+#define PAGE_MASK (PAGE_SIZE - 1)
 
 #define PT_SHIFT PAGE_SHIFT
 #define PT_SIZE PAGE_SIZE
+#define PT_MASK (PAGE_SIZE - 1)
 
 #define PD_SHIFT 21
-#define PD_SIZE  (1 << PD_SHIFT)
+#define PD_SIZE (1ul << PD_SHIFT)
+#define PD_MASK (PD_SIZE - 1)
 
 #define PDP_SHIFT 30
-#define PDP_SIZE (1 << PDP_SHIFT)
+#define PDP_SIZE (1ul << PDP_SHIFT)
+#define PDP_MASK (PDP_SIZE - 1)
+
+#define PML4_SHIFT 39
+#define PML4_SIZE (1ul << PML4_SHIFT)
+#define PML4_MASK (PML4_SIZE - 1)
 
 #define BYTES_TO_PAGES(bytes) ((bytes) >> PAGE_SHIFT)
 #define PAGES_TO_BYTES(pages) ((pages) << PAGE_SHIFT)
@@ -176,6 +220,10 @@ typedef struct {
 #define PFN40_MASK 0x000000fffffffffful
 #define ptr64_to_pfn40(ptr) \
         ((((uintptr_t)ptr) >> PAGE_SHIFT) & PFN40_MASK)
+
+#define PFN51_MASK 0x0007fffffffffffful
+#define ptr64_to_pfn51(ptr) \
+        ((((uintptr_t)ptr) >> PAGE_SHIFT) & PFN51_MASK)
 
 #define pgoff12(ptr) \
         (((intptr_t)ptr) & 0xffful)
@@ -199,11 +247,14 @@ typedef struct {
 #define pte_shift 12ul
 #define pte_mask 0x1fful
 #define pte_offset_mask ((1ul << pte_shift) - 1)
+#define page_shift PAGE_SHIFT
+#define page_mask (PAGE_SIZE - 1)
 
 #define get_pml4e(addr) (((addr) >> pml4e_shift) & pml4e_mask)
 #define get_pdpe(addr) (((addr) >> pdpe_shift) & pdpe_mask)
 #define get_pde(addr) (((addr) >> pde_shift) & pde_mask)
 #define get_pte(addr) (((addr) >> pte_shift) & pte_mask)
+#define get_pgoff(addr) (((addr)) & page_mask)
 #define get_pte_offset(addr) ((addr) & pte_offset_mask)
 #define get_pde_offset(addr) ((addr) & pde_offset_mask)
 #define get_pdpe_offset(addr) ((addr) & pdpe_offset_mask)

@@ -764,8 +764,9 @@ set_up_vm(void)
         ctx->vm_identity.guest_phys_addr = 0xfffbc000;
         ctx->vm_identity.memory_size = PAGE_SIZE;
         ctx->vm_identity.userspace_addr =
-                (uintptr_t)mmap(0, PAGE_SIZE, PROT_READ|PROT_WRITE,
-                                MAP_SHARED|MAP_ANONYMOUS, -1, 0);
+                (uintptr_t)mmap((void *)0xfffbc000ul, PAGE_SIZE, PROT_READ|PROT_WRITE,
+                                MAP_FIXED|MAP_SHARED|MAP_ANONYMOUS, -1, 0);
+        printf("vm_identity.guest_phys_addr: 0x%016llx\n", ctx->vm_identity.guest_phys_addr);
         printf("vm_identity.userspace_addr: 0x%016llx\n", ctx->vm_identity.userspace_addr);
         if (!ctx->vm_identity.userspace_addr) {
                 warn("Couldn't get identity map");
@@ -784,8 +785,9 @@ set_up_vm(void)
         ctx->vm_tss.guest_phys_addr = 0xfffbd000;
         ctx->vm_tss.memory_size = PAGE_SIZE * 3;
         ctx->vm_tss.userspace_addr =
-                (uintptr_t)mmap(0, PAGE_SIZE * 3, PROT_READ|PROT_WRITE,
-                                MAP_SHARED|MAP_ANONYMOUS, -1, 0);
+                (uintptr_t)mmap((void *)0xfffbd000ul, PAGE_SIZE * 3, PROT_READ|PROT_WRITE,
+                                MAP_FIXED|MAP_SHARED|MAP_ANONYMOUS, -1, 0);
+        printf("vm_tss.guest_phys_addr: 0x%016llx\n", ctx->vm_tss.guest_phys_addr);
         printf("vm_tss.userspace_addr: 0x%016llx\n", ctx->vm_tss.userspace_addr);
         if (!ctx->vm_tss.userspace_addr) {
                 warn("Couldn't get identity map");
@@ -830,14 +832,6 @@ set_up_vm(void)
                 warn("Couldn't get vm clock");
 
         printf("Current tsc: %llu\n", ctx->vm_clock.clock);
-
-        if (ioring_map_rings() < 0) {
-                warnx("Could not map IO rings");
-                goto err;
-        }
-        extern struct iorings *iorings__;
-        printf("iorings__: %p\n", iorings__);
-        fflush(stdout);
 
         return ctx;
 err:
@@ -921,6 +915,29 @@ init_stack(struct context *ctx)
         return 0;
 }
 
+typedef union {
+        struct {
+                /*
+                 * phys size = 1024 * PAGE_SIZE
+                 * codemap + 0x000 * PAGE_SIZE = instructions
+                 * codemap + 0x001 * PAGE_SIZE = pml4
+                 * codemap + 0x002 * PAGE_SIZE = pdp
+                 * codemap + 0x003 * PAGE_SIZE = pd
+                 * codemap + 0x004 * PAGE_SIZE = stack ends
+                 * codemap + 0x006 * PAGE_SIZE = stack begins
+                 * codemap + 0x007 * PAGE_SIZE = arena begins
+                 * codemap + 0x3ff * PAGE_SIZE = last in arena
+                 */
+                uint8_t code[PAGE_SIZE];
+                pml4e_t pml4[512];
+                pdpe_t pdp[512];
+                pde_t pd[512];
+                uint8_t stack[PAGE_SIZE * 3];
+                uint8_t memory[PAGE_SIZE * (1024 - 7)];
+        };
+        uint8_t arena[PAGE_SIZE * 1024];
+} arena_t;
+
 vmid_t hidden
 forkvm(const char *filename, char * const argv[] unused)
 {
@@ -934,6 +951,51 @@ forkvm(const char *filename, char * const argv[] unused)
                 return -1;
         }
 
+#if 1 && 0
+          /*
+           * .code16
+           * mov al, 0x61
+           * mov dx, 0x217
+           * out dx, al
+           * mov al, 10
+           * out dx, al
+           * hlt
+           */
+        uint8_t code[] = "\xB0\x61\xBA\x17\x02\xEE\xB0\n\xEE\xF4";
+
+        arena_t *arena;
+        arena = mmap(NULL, sizeof(*arena),
+                     PROT_READ|PROT_WRITE|PROT_EXEC,
+                     MAP_SHARED|MAP_ANONYMOUS, -1, 0);
+        if (arena == MAP_FAILED)
+                err(1, "mmap failed");
+
+        memset(arena, 0, sizeof(*arena));
+        memcpy(&arena->code, code, sizeof(code));
+
+        struct proc_map *map = calloc(1, sizeof(*map));
+        if (!map)
+                err(2, "calloc failed");
+        map->mode = M_R_OK|M_W_OK|M_X_OK|M_P_OK;
+        map->name = strdup("Code");
+        map->start = (uintptr_t)arena;
+        map->end = (uintptr_t)arena + sizeof(*arena);
+        map->pgoff = 0;
+
+        map->user_pages = true;
+        map->kumr.slot = 0;
+        map->kumr.flags = 0;
+        map->kumr.guest_phys_addr = map->start;
+        map->kumr.memory_size = sizeof(*arena);
+        map->kumr.userspace_addr = map->start;
+
+        list_add(&map->list, &ctx->guest_maps);
+
+        rc = vm_ioctl(ctx, KVM_SET_USER_MEMORY_REGION, &map->kumr);
+        if (rc < 0)
+                err(3, "KSUMR failed");
+
+#else
         ctx->phandle = dlmopen(LM_ID_NEWLM, filename, RTLD_LOCAL|RTLD_NOW);
         if (!ctx->phandle) {
                 warnx("dlmopen() failed: %s", dlerror());
@@ -955,7 +1017,6 @@ forkvm(const char *filename, char * const argv[] unused)
                 warnx("add_symbols failed");
                 goto err;
         }
-#endif
 
         extern struct iorings *iorings__;
         struct iorings **iorings = get_symbol_object(ctx, "iorings__");
@@ -972,6 +1033,7 @@ forkvm(const char *filename, char * const argv[] unused)
         (*iorings)->output = iorings__->input;
         msync(iorings, sizeof((*iorings)), MS_ASYNC|MS_INVALIDATE);
         printf("child after: input: %p output: %p\n", (*iorings)->input, (*iorings)->output);
+#endif
 
         rc = get_host_maps(ctx);
         if (rc < 0) {
@@ -1002,6 +1064,7 @@ forkvm(const char *filename, char * const argv[] unused)
                 warnx("init_paging() failed");
                 goto err;
         }
+#endif
 
         rc = init_segments(ctx);
         if (rc < 0) {
@@ -1025,6 +1088,13 @@ forkvm(const char *filename, char * const argv[] unused)
                 goto err;
         }
 
+#if 1 && 0
+        regs.rip = (uintptr_t)&arena->code;
+        regs.rsp = (uintptr_t)&arena->stack;
+        regs.rdi = ((uintptr_t)&arena->memory) - 16;
+        regs.rsi = sizeof(arena->memory);
+        regs.rflags = 0x2;
+#else
         uint64_t offset = 1ul << 32;
         regs.rip = get_symbol_guest_object(ctx, "main") + offset;
         if (regs.rip == 0) {
@@ -1036,7 +1106,7 @@ forkvm(const char *filename, char * const argv[] unused)
         regs.rax = 0;
         regs.rbx = 0;
         regs.rflags = 0x2;
-
+#endif
         printf("setting rip=0x%016llx rsp=0x%016llx\n", regs.rip, regs.rsp);
 
         rc = vcpu_ioctl(ctx, KVM_SET_REGS, &regs);
@@ -1045,7 +1115,63 @@ forkvm(const char *filename, char * const argv[] unused)
                 goto err;
         }
 
+#if 1 && 0
+        struct kvm_sregs sregs;
+        rc = vcpu_ioctl(ctx, KVM_GET_SREGS, &sregs);
+        if (rc < 0)
+                err(4, "KVM_GET_SREGS failed");
+
+        ctx->pml4 = &arena->pml4[0];
+
+        cr3_t *cr3 = (cr3_t *)&sregs.cr3;
+        printf("cr3: 0x%016lx -> ", cr3->cr3);
+        cr3->cr3 = 0;
+        cr3->pml4_base = ptr64_to_pfn40(ctx->pml4);
+        printf("cr3: 0x%016lx\n", cr3->cr3);
+
+        cr4_t *cr4 = (cr4_t *)&sregs.cr4;
+        printf("cr4: 0x%016lx -> ", cr4->cr4);
+        cr4->cr4 = 0;
+        cr4->pae = 1;
+        cr4->osfxsr = 1;
+        cr4->osxmmexcpt = 1;
+        printf("cr4: 0x%016lx\n", cr4->cr4);
+
+        cr0_t *cr0 = (cr0_t *)&sregs.cr0;
+        printf("cr0: 0x%016lx -> ", cr0->cr0);
+        cr0->cr0 = 0;
+        cr0->pe = 1;
+        cr0->mp = 1;
+        cr0->et = 1;
+        cr0->ne = 1;
+        cr0->wp = 1;
+        cr0->am = 1;
+        cr0->pg = 1;
+        printf("cr0: 0x%016lx\n", cr0->cr0);
+
+        efer_t *efer = (efer_t *)&sregs.efer;
+        printf("efer: 0x%016lx -> ", efer->efer);
+        efer->efer = 0;
+        efer->lme = 1;
+        efer->lma = 1;
+        efer->sce = 1;
+        printf("efer: 0x%016lx\n", efer->efer);
+
+        pml4e_t *pml4 = ctx->pml4;
+        pml4[0].us = 1;
+        pml4[0].rw = 1;
+        pml4[0].p = 1;
+        pml4[0].pdp_base = ptr64_to_pfn51(&arena->pdp);
+
+        pdpe_t *pdp = &arena->pdp[0];
+        pdp[0].us = 1;
+        pdp[0].rw = 1;
+        pdp[0].p = 1;
+        pdp[0].pd_base = ptr64_to_pfn51(&arena->pd);
+
+#else
         finalize_paging(ctx);
+#endif
 
         bool go = true;
         while (go) {
@@ -1054,6 +1180,7 @@ forkvm(const char *filename, char * const argv[] unused)
                 int64_t timediff;
 
                 gettimeofday(&tv0, NULL);
+                printf("Doing KVM_RUN\n");
                 rc = vcpu_ioctl(ctx, KVM_RUN, 0);
                 gettimeofday(&tv1, NULL);
                 if (rc < 0) {

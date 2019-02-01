@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <sys/mman.h>
 
+#define qprintf(...)
+
 #if 0
 static size_t ntables;
 static paging_table_t *tables;
@@ -123,7 +125,7 @@ finalize_paging(void)
         if (((intptr_t)tables & (PAGE_SIZE - 1)) == 0)
                 return 0;
 
-        warnx("finalizing paging");
+        printf("finalizing paging\n");
 
         rc = posix_memalign((void **)&newtables, PAGE_SIZE, sz);
         if (rc < 0) {
@@ -438,7 +440,7 @@ new_page_table_list(struct context *ctx)
         if (!ctx->pml4)
                 ctx->pml4 = ret->table.pml4;
 
-        printf("new paging table at %p\n", ret);
+        qprintf("new paging table at %p\n", ret);
         return ret;
 }
 
@@ -483,31 +485,20 @@ map_pt_entry(pte_t *pt, uintptr_t va,
 {
         pte_t *pte;
 
-        printf("Mapping 0x1000 bytes at 0x%016lx in PTE 0x%03lx\n",
-               va, get_pte(va));
+        printf("       Mapping 0x1000 bytes at 0x%016lx in PT[0x%03lx]\n",
+               va & ~PAGE_MASK, get_pte(va));
         pte = &pt[get_pte(va)];
         if (!pte->p) {
-                printf("  initializing PTE 0x%03lx (page_base:%p)\n", get_pte(va), (void *)va);
                 pte->page_base = ptr64_to_pfn40(va);
+                printf("        create PT[0x%03lx] (page_base:0x%lx nx:%d us:%d rw:%d)\n", get_pte(va), (uintptr_t)pte->page_base, nx, user, rw);
                 pte->nx = nx;
                 pte->pwt = pte->rw = rw;
                 pte->us = user;
                 pte->p = 1;
         } else {
-                printf("  updating PTE 0x%03lx (page_base:%p)\n", get_pte(va), (void *)((intptr_t)pte->page_base << PAGE_SHIFT));
-                if (nx != pte->nx) {
-                        warnx("existing PTE NX %d doesn't match new NX %d",
-                              pte->nx, nx);
-                        return -1;
-                }
-                if (user != pte->us) {
-                        warnx("existing PTE US %d doesn't match new US %d",
-                              pte->us, user);
-                        return -1;
-                }
-                if (rw != pte->rw) {
-                        warnx("existing PTE RW %d doesn't match new RW %d",
-                              pte->rw, rw);
+                printf("        update PT[0x%03lx] (page_base:0x%lx nx:%d->%d us:%d->%d rw:%d->%d)\n", get_pte(va), (uintptr_t)pte->page_base, pte->nx, nx, pte->us, user, pte->rw, rw);
+                if (nx != pte->nx || user != pte->us || rw != pte->rw) {
+                        printf("            Not changing permissions on PTE\n");
                         return -1;
                 }
         }
@@ -519,15 +510,31 @@ int private nonnull(1)
 map_pt_entries(pte_t *pt, uintptr_t va, size_t size,
                bool nx, bool user, bool rw)
 {
+        bool first = true;
         do {
                 int rc;
+                uint64_t base = va - (va % PT_SIZE);
+                uint64_t rem = base + PT_SIZE - va;
+#if 0
+                printf("va:   0x%016lx\n", va);
+                printf("base: 0x%016lx\n", base);
+                printf("rem:  0x%016lx\n", rem);
+                printf("        size:0x%016lx PT_SIZE:0x%016lx rem:0x%016lx\n", size, PT_SIZE, rem);
+#endif
 
+                fflush(stdout);
+                if (!first && get_pte(va) == 0) {
+                        printf("gaol: pte table overflow\n");
+                        fflush(stdout);
+                        fflush(stderr);
+                }
+                first = false;
                 rc = map_pt_entry(pt, va, nx, user, rw);
                 if (rc < 0)
                         return rc;
 
-                va += min(size, PT_SIZE);
-                size -= min(size, PT_SIZE);
+                va += min(size, rem);
+                size -= min(size, rem);
         } while (size);
 
         return 0;
@@ -541,8 +548,8 @@ map_pd_entry(struct context *ctx, pde_t *pd,
         pde_t *pde;
         pte_t *pt;
 
-        printf("Mapping 0x%lx bytes at 0x%016lx in PDE 0x%03lx\n",
-               size, va, get_pde(va));
+        printf("     Mapping 0x%lx bytes at 0x%016lx in PD[0x%03lx]\n",
+               size, va & ~PT_MASK, get_pde(va));
         pde = &pd[get_pde(va)];
         if (!pde->p) {
                 page_table_list_t *ptl = new_page_table_list(ctx);
@@ -552,37 +559,33 @@ map_pd_entry(struct context *ctx, pde_t *pd,
                         return -1;
                 }
 
-                printf("  initializing PDE 0x%03lx\n", get_pde(va));
                 pt = &ptl->table.pt[0];
                 pde->pt_base = ptr64_to_pfn40(&ptl->table.pt[0]);
+                printf("      create PD[0x%03lx] (pt_base:0x%lx nx:%d us:%d rw:%d)\n", get_pde(va), (uintptr_t)pde->pt_base, nx, user, rw);
                 pde->nx = nx;
                 pde->pwt = pde->rw = rw;
                 pde->us = user;
                 pde->ps = size == PD_SIZE;
                 pde->p = 1;
         } else {
-                printf("  updating PDE 0x%03lx\n", get_pde(va));
-                if (nx != pde->nx) {
-                        warnx("existing PDE NX %d doesn't match new NX %d",
-                              pde->nx, nx);
-                        return -1;
+                if (!nx && pde->nx)
+                        pde->nx = 0;
+                if (user && !pde->us) {
+                        user = true;
+                        pde->us = 1;
                 }
-                if (user != pde->us) {
-                        warnx("existing PDE US %d doesn't match new US %d",
-                              pde->us, user);
-                        return -1;
+                if (rw && !pde->rw) {
+                        rw = true;
+                        pde->rw = 1;
                 }
-                if (rw != pde->rw) {
-                        warnx("existing PDE RW %d doesn't match new RW %d",
-                              pde->rw, rw);
-                        return -1;
-                }
+                printf("      update PD[0x%03lx] (pt_base:0x%lx nx:%d->%d us:%d->%d rw:%d->%d)\n", get_pde(va), (uintptr_t)pde->pt_base, pde->nx, nx, pde->us, user, pde->rw, rw);
                 pt = pfn40_to_ptr64(pde->pt_base);
         }
 
         if (pde->ps)
                 return 0;
 
+        return 0;
         return map_pt_entries(pt, va, size, nx, user, rw);
 }
 
@@ -593,15 +596,23 @@ map_pd_entries(struct context *ctx, pde_t *pd,
 {
         do {
                 int rc;
+                uint64_t base = va & ~(PD_SIZE-1);
+                uint64_t rem = base + PD_SIZE - va;
+#if 0
+                printf("va:   0x%016lx\n", va);
+                printf("base: 0x%016lx\n", base);
+                printf("rem:  0x%016lx\n", rem);
+                printf("      size:0x%016lx PD_SIZE:0x%016lx rem:0x%016lx\n", size, PD_SIZE, rem);
+#endif
 
                 rc = map_pd_entry(ctx, pd,
-                                  va, min(size, PD_SIZE),
+                                  va, min(size, rem),
                                   nx, user, rw);
                 if (rc < 0)
                         return rc;
 
-                va += min(size, PD_SIZE);
-                size -= min(size, PD_SIZE);
+                va += min(size, rem);
+                size -= min(size, rem);
         } while (size);
 
         return 0;
@@ -615,8 +626,8 @@ map_pdp_entry(struct context *ctx, pdpe_t *pdp,
         pdpe_t *pdpe;
         pde_t *pd;
 
-        printf("Mapping 0x%lx bytes at 0x%016lx in PDPE 0x%03lx\n",
-               size, va, get_pdpe(va));
+        printf("   Mapping 0x%lx bytes at 0x%016lx in PDP[0x%03lx]\n",
+               size, va & ~PD_MASK, get_pdpe(va));
         pdpe = &pdp[get_pdpe(va)];
         if (!pdpe->p) {
                 page_table_list_t *ptl = new_page_table_list(ctx);
@@ -627,38 +638,33 @@ map_pdp_entry(struct context *ctx, pdpe_t *pdp,
                 }
 
                 pd = &ptl->table.pd[0];
-                printf("  initializing PDPE 0x%03lx\n", get_pdpe(va));
-                printf("    pdpe is at %p\n", pdpe);
-                printf("    pd_base is 0x%016lx\n", ptr64_to_pfn40(pd));
                 pdpe->pd_base = ptr64_to_pfn40(pd);
+                printf("    create PDP[0x%03lx] (pd_base:0x%lx nx:%d us:%d rw:%d)\n", get_pdpe(va), (uintptr_t)pdpe->pd_base, nx, user, rw);
                 pdpe->nx = nx;
                 pdpe->pwt = pdpe->rw = rw;
                 pdpe->us = user;
                 pdpe->ps = size == PDP_SIZE;
                 pdpe->p = 1;
         } else {
-                printf("  updating PDPE 0x%03lx\n", get_pdpe(va));
-                if (nx != pdpe->nx) {
-                        warnx("existing PDPE NX %d doesn't match new NX %d",
-                              pdpe->nx, nx);
-                        return -1;
+                if (!nx && pdpe->nx)
+                        pdpe->nx = 0;
+                if (user && !pdpe->us) {
+                        user = true;
+                        pdpe->us = 1;
                 }
-                if (user != pdpe->us) {
-                        warnx("existing PDPE US %d doesn't match new US %d",
-                              pdpe->us, user);
-                        return -1;
+                if (rw && !pdpe->rw) {
+                        rw = true;
+                        pdpe->rw = 1;
                 }
-                if (rw != pdpe->rw) {
-                        warnx("existing PDPE RW %d doesn't match new RW %d",
-                              pdpe->rw, rw);
-                        return -1;
-                }
+                printf("    update PDP[0x%lx] (pd_base:0x%lx nx:%d->%d us:%d->%d rw:%d->%d)\n", get_pdpe(va), (uintptr_t)pdpe->pd_base, pdpe->nx, nx, pdpe->us, user, pdpe->rw, rw);
+
                 pd = pfn40_to_ptr64(pdpe->pd_base);
         }
 
         if (pdpe->ps)
                 return 0;
 
+        return 0;
         return map_pd_entries(ctx, pd, va, size, nx, user, rw);
 }
 
@@ -669,15 +675,17 @@ map_pdp_entries(struct context *ctx, pdpe_t *pdp,
 {
         do {
                 int rc;
+                uint64_t base = va & ~(PDP_SIZE-1);
+                uint64_t rem = base + PDP_SIZE - va;
 
                 rc = map_pdp_entry(ctx, pdp,
-                                   va, min(size, PDP_SIZE),
+                                   va, min(size, rem),
                                    nx, user, rw);
                 if (rc < 0)
                         return rc;
 
-                va += min(size, PDP_SIZE);
-                size -= min(size, PDP_SIZE);
+                va += min(size, rem);
+                size -= min(size, rem);
         } while (size);
 
         return 0;
@@ -692,8 +700,9 @@ map_pml4_entry(struct context *ctx, pml4e_t *pml4,
         pdpe_t *pdp;
 
         pml4e = &pml4[get_pml4e(va)];
-        printf("Mapping 0x%lx bytes at 0x%016lx in PML4E 0x%03lx\n",
-               size, va, get_pml4e(va));
+        qprintf("pml4:%p pml4[0x%lx] is at %p\n", pml4, get_pml4e(va), pml4e);
+        printf(" Mapping 0x%lx bytes at 0x%016lx in PML4[0x%03lx]\n",
+               size, va & ~PDP_MASK, get_pml4e(va));
         if (!pml4e->p) {
                 page_table_list_t *ptl = new_page_table_list(ctx);
 
@@ -703,32 +712,35 @@ map_pml4_entry(struct context *ctx, pml4e_t *pml4,
                 }
 
                 pdp = &ptl->table.pdp[0];
-                printf("  initializing PML4E 0x%03lx (pdp_base:%p)\n", get_pml4e(va), pdp);
                 pml4e->pdp_base = ptr64_to_pfn40(pdp);
+                printf("  create PML4[0x%03lx] (pdp_base:0x%lx nx:%d us:%d rw:%d)\n", get_pml4e(va), (uintptr_t)pml4e->pdp_base, nx, user, rw);
                 pml4e->nx = nx;
                 pml4e->pwt = pml4e->rw = rw;
                 pml4e->us = user;
                 pml4e->p = 1;
         } else {
                 pdp = pfn40_to_ptr64(pml4e->pdp_base);
-                printf("  updating PML4E 0x%03lx (pdp_base:%p)\n", get_pml4e(va), pdp);
-                if (nx != pml4e->nx) {
-                        warnx("existing PML4E NX %d doesn't match new NX %d",
-                              pml4e->nx, nx);
+                bool update = false;
+                if (!nx && pml4e->nx) {
                         pml4e->nx = 0;
+                        update = true;
                 }
-                if (user != pml4e->us) {
-                        warnx("existing PML4E US %d doesn't match new US %d",
-                              pml4e->us, user);
+                if (user && !pml4e->us) {
+                        user = true;
                         pml4e->us = 1;
+                        update = true;
                 }
-                if (rw != pml4e->rw) {
-                        warnx("existing PML4E RW %d doesn't match new RW %d",
-                              pml4e->rw, rw);
+                if (rw && !pml4e->rw) {
+                        rw = true;
                         pml4e->rw = 1;
+                        update = true;
                 }
+
+                if (update)
+                        printf("  update PML4[0x%03lx] (pdp_base:0x%lx nx:%d->%d us:%d->%d rw:%d->%d)\n", get_pml4e(va), (uintptr_t)pml4e->pdp_base, pml4e->nx, nx, pml4e->us, user, pml4e->rw, rw);
         }
 
+        return 0;
         return map_pdp_entries(ctx, pdp, va, size, nx, user, rw);
 }
 
@@ -739,15 +751,26 @@ map_pml4_entries(struct context *ctx, pml4e_t *pml4,
 {
         do {
                 int rc;
+                uint64_t base = va & ~(PML4_SIZE-1);
+                uint64_t rem = base + PML4_SIZE - va;
+
+                printf("Mapping pml4 entries from 0x%016lx to 0x%016lx\n",
+                       va, va + size);
+
+#if 0
+                printf("va:   0x%016lx & 0x%016lx = 0x%016lx\n", va, ~(PML4_SIZE-1), va & ~(PML4_SIZE-1));
+                printf("base: 0x%016lx\n", base);
+                printf("rem:  0x%016lx\n", rem);
+#endif
 
                 rc = map_pml4_entry(ctx, pml4,
-                                    va, min(size, PDP_SIZE),
+                                    va, min(size, rem),
                                     nx, user, rw);
                 if (rc < 0)
                         return rc;
 
-                va += min(size, PDP_SIZE);
-                size -= min(size, PDP_SIZE);
+                va += min(size, rem);
+                size -= min(size, rem);
         } while (size);
 
         return 0;
@@ -760,13 +783,79 @@ map_pages(struct context *ctx,
 {
         page_table_list_t *pt;
         pml4e_t *pml4 = NULL;
+        int rc;
 
-        pt = list_entry(ctx->page_tables.next, page_table_list_t, list);
+        pt = list_entry(ctx->page_tables.prev, page_table_list_t, list);
         pml4 = &pt->table.pml4[0];
-        printf("pml4 is at %p\n", pml4);
         if (!pml4)
                 return -1;
 
+        printf("Mapping pages for 0x%016lx to 0x%016lx nx:%d us:%d rw:%d\n", va, va + size, nx, user, rw);
+
+        int16_t prev_pml4e = -1;
+        int16_t prev_pdpe = -1;
+        int16_t prev_pde = -1;
+        int16_t prev_pte = -1;
+        for (uintptr_t pgva = va; pgva < va+size; pgva += PAGE_SIZE) {
+                int16_t pml4e, pdpe, pde, pte;
+
+                pdpe_t *pdp = NULL;
+                pde_t *pd = NULL;
+                pte_t *pt = NULL;
+
+                pml4e = get_pml4e(pgva);
+                if (pml4e != prev_pml4e) {
+                        //printf("next pml4[0x%03hx]\n", pml4e);
+                        rc = map_pml4_entry(ctx, pml4, pgva, size, nx, user, rw);
+                        if (rc < 0)
+                                return rc;
+                }
+
+                pdpe = get_pdpe(pgva);
+                pdp = (pdpe_t *)pfn40_to_ptr64(pml4[pml4e].pdp_base);
+                if (pdpe != prev_pdpe) {
+                        //printf("  next pdp[0x%03hx]\n", pdpe);
+                        rc = map_pdp_entry(ctx, pdp, pgva, size, nx, user, rw);
+                        if (rc < 0)
+                                return rc;
+                        if (size >= PDP_SIZE) {
+                                pgva += PDP_SIZE - PAGE_SIZE;
+                                size -= PDP_SIZE;
+                                continue;
+                        }
+                }
+
+                pde = get_pde(pgva);
+                pd = (pde_t *)pfn40_to_ptr64(pdp[pdpe].pd_base);
+                if (pde != prev_pde) {
+                        //printf("    next pd[0x%03hx]\n", pde);
+                        rc = map_pd_entry(ctx, pd, pgva, size, nx, user, rw);
+                        if (rc < 0)
+                                return rc;
+                        if (size >= PD_SIZE) {
+                                pgva += PD_SIZE - PAGE_SIZE;
+                                size -= PD_SIZE;
+                                continue;
+                        }
+                }
+
+                pte = get_pte(pgva);
+                pt = (pte_t *)pfn40_to_ptr64(pd[pde].pt_base);
+                if (pte != prev_pte) {
+                        //printf("        next pt[0x%03hx]\n", pte);
+                        rc = map_pt_entry(pt, pgva, nx, user, rw);
+                        if (rc < 0)
+                                return rc;
+                        size -= PAGE_SIZE;
+                }
+
+                prev_pml4e = pml4e;
+                prev_pdpe = pdpe;
+                prev_pde = pde;
+                prev_pte = pte;
+        }
+
+        return 0;
         return map_pml4_entries(ctx, pml4, va, size, nx, user, rw);
 }
 
@@ -780,7 +869,7 @@ finalize_paging(struct context *ctx)
         pml4e_t *pml4;
         unsigned int n;
 
-	struct kvm_sregs sregs;
+        struct kvm_sregs sregs;
         int rc;
 
         printf("Building page tables\n");
@@ -880,14 +969,29 @@ finalize_paging(struct context *ctx)
 
         dump_pgtbls(*cr3);
 
-	sregs.cr4 = CR4_PAE;
+        cr4_t *cr4 = (cr4_t *)&sregs.cr4;
+        cr4->cr4 = 0;
+        cr4->pae = 1;
         /* enable SSE instruction */
-	sregs.cr4 |= CR4_OSFXSR | CR4_OSXMMEXCPT;
-	sregs.cr0 = CR0_PE | CR0_MP | CR0_ET | CR0_NE | CR0_WP \
-                    | CR0_AM | CR0_PG;
-	sregs.efer = EFER_LME | EFER_LMA;
+        cr4->osfxsr = 1;
+        cr4->osxmmexcpt = 1;
+
+        cr0_t *cr0 = (cr0_t *)&sregs.cr0;
+        cr0->cr0 = 0;
+        cr0->pe = 1;
+        cr0->mp = 1;
+        cr0->et = 1;
+        cr0->ne = 1;
+        cr0->wp = 1;
+        cr0->am = 1;
+        cr0->pg = 1;
+
+        efer_t *efer = (efer_t *)&sregs.efer;
+        efer->efer = 0;
+        efer->lme = 1;
+        efer->lma = 1;
         /* enable syscall instruction */
-	/* sregs.efer |= EFER_SCE; */
+        /* efer->sce = 1; */
 
         rc = vcpu_ioctl(ctx, KVM_SET_SREGS, &sregs);
         if (rc < 0) {
@@ -904,9 +1008,9 @@ static void unused
 dump_sreg(const char * const name, struct kvm_segment sreg)
 {
         printf("%s:", name);
-        printf("base=0x%016llx limit=0x%08x selector=0x%04hx type=0x%02hhx ",
+        printf("base=0x%016llx lim=0x%08x sel=0x%04hx type=0x%02hhx ",
                sreg.base, sreg.limit, sreg.selector, sreg.type);
-        printf("present=0x%02hhx dpl=0x%02hhx db=0x%02hhx s=0x%02hhx ",
+        printf("pres=0x%02hhx dpl=0x%02hhx db=0x%02hhx s=0x%02hhx ",
                sreg.present, sreg.dpl, sreg.db, sreg.s);
         printf("l=0x%02hhx g=0x%02hhx avl=0x%02hhx\n",
                sreg.l, sreg.g, sreg.avl);
@@ -914,7 +1018,7 @@ dump_sreg(const char * const name, struct kvm_segment sreg)
 
 int private
 init_segments(struct context *ctx) {
-	struct kvm_sregs sregs;
+        struct kvm_sregs sregs;
         int rc;
 
         rc = vcpu_ioctl(ctx, KVM_GET_SREGS, &sregs);
@@ -925,8 +1029,8 @@ init_segments(struct context *ctx) {
 
         sregs.cs.base = sregs.cs.selector = 0;
 
-#if 0
         dump_sreg("cs", sregs.cs);
+#if 0
         dump_sreg("ds", sregs.ds);
         dump_sreg("es", sregs.es);
         dump_sreg("fs", sregs.fs);
